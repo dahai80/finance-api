@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 
 from config import get_logger, settings
 from data_provider import akshare_fetcher
 from data_provider.ipo_scorer import score_ipo
+from data_provider.industry_map import get_industry_heat
 import storage
 
 router = APIRouter(prefix="/api/ipo", tags=["ipo"])
@@ -37,7 +40,7 @@ async def sync_ipo() -> dict:
 
         scored = 0
         for row in rows:
-            result = score_ipo(row)
+            result = await _score_with_industry_heat(row)
             await storage.update_ipo_score(
                 row["stock_code"], result["total"], result["recommendation"]
             )
@@ -52,3 +55,27 @@ async def sync_ipo() -> dict:
     except Exception as exc:
         log.exception("ipo sync failed")
         raise HTTPException(status_code=500, detail=f"sync failed: {exc}") from exc
+
+
+async def _score_with_industry_heat(row: dict) -> dict:
+    """Score IPO with async industry heat lookup."""
+    fm = row.get("fundamental_metrics") or {}
+    board_type = str(fm.get("board_type", ""))
+
+    base_result = score_ipo(row)
+    scores = base_result["scores"]
+
+    try:
+        heat_score = await get_industry_heat(board_type)
+        scores["industry_heat"] = heat_score
+        base_result["total"] = int(sum(scores.values()))
+        if base_result["total"] >= 70:
+            base_result["recommendation"] = "HIGH"
+        elif base_result["total"] >= 50:
+            base_result["recommendation"] = "MID"
+        else:
+            base_result["recommendation"] = "LOW"
+    except Exception:
+        log.exception("industry heat lookup failed for %s", row.get("stock_code"))
+
+    return base_result

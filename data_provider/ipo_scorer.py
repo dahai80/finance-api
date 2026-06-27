@@ -26,15 +26,19 @@ def score_ipo(item: dict[str, Any]) -> dict[str, Any]:
     """
     Five-dimension radar scoring (0-100 total, 5 dims x 20pts each):
       1. valuation    (20): PE discount vs industry
-      2. growth       (20): revenue & profit growth (stub until data source)
-      3. industry_heat(20): sector capital flow ranking (stub)
-      4. institution  (20): offline subscription multiple (stub)
+      2. growth       (20): ballot rate inverse as demand proxy
+      3. industry_heat(20): sector capital flow ranking (from akshare)
+      4. institution  (20): inquiry multiple + quoting institutions
       5. low_risk     (20): break-even risk inverse
     """
     fm = item.get("fundamental_metrics") or {}
     pe = _safe(fm.get("pe"))
     industry_pe = _safe(fm.get("industry_pe"))
     price = _safe(fm.get("price"))
+    inquiry_multiple = _safe(fm.get("inquiry_multiple"))
+    quoting_institutions = _safe(fm.get("quoting_institutions"))
+    ballot_rate = _safe(fm.get("ballot_rate"))
+    board_type = str(fm.get("board_type", ""))
 
     scores: dict[str, float] = {}
 
@@ -45,14 +49,26 @@ def score_ipo(item: dict[str, Any]) -> dict[str, Any]:
     else:
         scores["valuation"] = 10.0
 
-    # 2. growth: stub — need prospectus data
-    scores["growth"] = 10.0
+    # 2. growth: ballot rate inverse as demand proxy
+    # Lower ballot rate = scarcer = higher growth expectation
+    if ballot_rate > 0:
+        growth_raw = (1.0 - min(ballot_rate, 1.0)) * 20
+        scores["growth"] = _clamp(growth_raw, 0, 20)
+    else:
+        scores["growth"] = 10.0
 
-    # 3. industry_heat: stub — need sector capital flow
-    scores["industry_heat"] = 10.0
+    # 3. industry_heat: will be filled by async call in ipo router
+    # For now use board type heuristic
+    scores["industry_heat"] = _board_type_heat(board_type)
 
-    # 4. institution: stub — need offline subscription data
-    scores["institution"] = 10.0
+    # 4. institution: inquiry multiple + quoting institutions
+    if inquiry_multiple > 0 and quoting_institutions > 0:
+        inst_score = _clamp((inquiry_multiple / 500.0) * (quoting_institutions / 1000.0) * 20, 0, 20)
+        scores["institution"] = inst_score
+    elif inquiry_multiple > 0:
+        scores["institution"] = _clamp(inquiry_multiple / 250.0, 0, 20)
+    else:
+        scores["institution"] = 10.0
 
     # 5. break-even risk: lower PE / industry_pe ratio = lower risk
     if pe > 0 and industry_pe > 0:
@@ -81,3 +97,17 @@ def score_ipo(item: dict[str, Any]) -> dict[str, Any]:
         "total": total,
         "recommendation": rec,
     }
+
+
+def _board_type_heat(board_type: str) -> float:
+    """
+    Heuristic industry heat based on board type.
+    More detailed async lookup available via industry_map.get_industry_heat().
+    """
+    heat_map = {
+        "科创板": 16.0,
+        "创业板": 14.0,
+        "主板": 12.0,
+        "北交所": 10.0,
+    }
+    return heat_map.get(board_type, 10.0)

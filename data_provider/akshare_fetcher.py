@@ -17,6 +17,12 @@ MOCK_IPO_ROWS: list[dict[str, Any]] = [
             "price": 12.5,
             "pe": 18.3,
             "industry_pe": 25.6,
+            "inquiry_multiple": 3200.0,
+            "quoting_institutions": 8500.0,
+            "ballot_rate": 0.025,
+            "subscription_cap": 85000.0,
+            "total_float": 1800.0,
+            "board_type": "创业板",
             "source": "mock",
         },
     },
@@ -28,6 +34,12 @@ MOCK_IPO_ROWS: list[dict[str, Any]] = [
             "price": 28.0,
             "pe": 32.1,
             "industry_pe": 29.4,
+            "inquiry_multiple": 5800.0,
+            "quoting_institutions": 12000.0,
+            "ballot_rate": 0.018,
+            "subscription_cap": 95000.0,
+            "total_float": 2200.0,
+            "board_type": "科创板",
             "source": "mock",
         },
     },
@@ -39,6 +51,12 @@ MOCK_IPO_ROWS: list[dict[str, Any]] = [
             "price": 18.7,
             "pe": 22.0,
             "industry_pe": 24.8,
+            "inquiry_multiple": 1500.0,
+            "quoting_institutions": 6200.0,
+            "ballot_rate": 0.042,
+            "subscription_cap": 70000.0,
+            "total_float": 1500.0,
+            "board_type": "主板",
             "source": "mock",
         },
     },
@@ -48,7 +66,7 @@ MOCK_IPO_ROWS: list[dict[str, Any]] = [
 def fetch_upcoming_ipo_live() -> list[dict[str, Any]]:
     """
     Live AkShare fetch: upcoming IPO subscriptions.
-    Uses ak.stock_new_gh_tpl() and maps columns to our schema.
+    Uses ak.stock_xgsglb_em() and maps columns to our schema.
     Returns empty list if akshare not available or call fails.
     """
     try:
@@ -74,6 +92,12 @@ def fetch_upcoming_ipo_live() -> list[dict[str, Any]]:
             price = _to_float(row.get("发行价格"))
             pe = _to_float(row.get("发行市盈率"))
             industry_pe = _to_float(row.get("行业市盈率"))
+            inquiry_multiple = _to_float(row.get("询价累计报价倍数"))
+            quoting_institutions = _to_float(row.get("配售对象报价家数"))
+            ballot_rate = _to_float(row.get("中签率"))
+            subscription_cap = _to_float(row.get("申购上限"))
+            total_float = _to_float(row.get("发行总数"))
+            board_type = str(row.get("板块", "")).strip() or "未知"
 
             rows.append({
                 "stock_code": code,
@@ -83,6 +107,12 @@ def fetch_upcoming_ipo_live() -> list[dict[str, Any]]:
                     "price": price,
                     "pe": pe,
                     "industry_pe": industry_pe,
+                    "inquiry_multiple": inquiry_multiple,
+                    "quoting_institutions": quoting_institutions,
+                    "ballot_rate": ballot_rate,
+                    "subscription_cap": subscription_cap,
+                    "total_float": total_float,
+                    "board_type": board_type,
                     "source": "akshare",
                 },
             })
