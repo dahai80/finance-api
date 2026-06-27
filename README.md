@@ -88,10 +88,13 @@ curl http://localhost:8000/api/ipo
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/market/money-flow` | 板块资金流向（Redis ZSET） |
-| GET | `/api/market/alerts` | 异动预警列表 |
-| GET | `/api/market/sentiment` | 市场情绪分析 |
+| GET | `/api/market/alerts` | 异动预警列表（fc_market_alerts） |
+| POST | `/api/market/alerts` | 创建异动预警 |
+| GET | `/api/market/sentiment` | 市场情绪分析（fc_market_sentiment_snapshot） |
+| POST | `/api/market/sentiment/snapshot` | 保存当日情绪快照 |
 | GET | `/api/market/kline/predict` | K线预测（需 kronos 服务） |
 | GET | `/api/market/kronos/health` | Kronos 服务健康检查 |
+| GET | `/api/market/snapshots` | 股票快照列表（fc_stock_snapshot） |
 
 ### Industry 行业
 

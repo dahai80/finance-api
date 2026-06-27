@@ -269,3 +269,256 @@ async def insert_industry_event(
         event_time,
     )
     return row["event_id"] if row else 0
+
+
+# ── fc_market_alerts ─────────────────────────────────────────────
+
+
+async def insert_market_alert(
+    stock_code: str,
+    alert_type: str,
+    direction: int,
+    severity: str,
+    event_description: str,
+) -> int:
+    """Insert a market alert into fc_market_alerts."""
+    pg = await get_pg()
+    row = await pg.fetchrow(
+        """
+        INSERT INTO finance_control.fc_market_alerts
+            (stock_code, alert_type, direction, severity, event_description)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING alert_id
+        """,
+        stock_code, alert_type, direction, severity, event_description,
+    )
+    alert_id = row["alert_id"] if row else 0
+    log.info("inserted market alert id=%d code=%s type=%s severity=%s", alert_id, stock_code, alert_type, severity)
+    return alert_id
+
+
+async def get_market_alerts(
+    limit: int = 50,
+    severity: str | None = None,
+    is_handled: bool | None = None,
+) -> list[dict[str, Any]]:
+    """Query market alerts from fc_market_alerts."""
+    pg = await get_pg()
+    where_clauses: list[str] = []
+    params: list[Any] = []
+
+    if severity:
+        where_clauses.append(f"severity = ${len(params) + 1}")
+        params.append(severity)
+    if is_handled is not None:
+        where_clauses.append(f"is_handled = ${len(params) + 1}")
+        params.append(is_handled)
+
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    rows = await pg.fetch(
+        f"""
+        SELECT alert_id, stock_code, alert_type, direction, severity,
+               event_description, is_handled, created_at
+        FROM finance_control.fc_market_alerts{where_sql}
+        ORDER BY created_at DESC
+        LIMIT ${len(params) + 1}
+        """,
+        *params, limit,
+    )
+    return [dict(r) for r in rows]
+
+
+# ── fc_market_sentiment_snapshot ───────────────────────────────────
+
+
+async def upsert_sentiment_snapshot(
+    trade_date: date,
+    us_markets: dict[str, Any],
+    china_concepts_idx: dict[str, Any],
+    ftse_a50: dict[str, Any],
+    prev_day_money_flow: list[dict[str, Any]],
+) -> None:
+    """Upsert daily market sentiment snapshot into fc_market_sentiment_snapshot."""
+    pg = await get_pg()
+    await pg.execute(
+        """
+        INSERT INTO finance_control.fc_market_sentiment_snapshot
+            (trade_date, us_markets, china_concepts_idx, ftse_a50, prev_day_money_flow)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (trade_date) DO UPDATE SET
+            us_markets = EXCLUDED.us_markets,
+            china_concepts_idx = EXCLUDED.china_concepts_idx,
+            ftse_a50 = EXCLUDED.ftse_a50,
+            prev_day_money_flow = EXCLUDED.prev_day_money_flow
+        """,
+        trade_date,
+        _json_mod.dumps(us_markets),
+        _json_mod.dumps(china_concepts_idx),
+        _json_mod.dumps(ftse_a50),
+        _json_mod.dumps(prev_day_money_flow),
+    )
+    log.info("upserted sentiment snapshot for %s", trade_date.isoformat())
+
+
+async def get_sentiment_snapshot(trade_date: date | None = None) -> dict[str, Any] | None:
+    """Get a sentiment snapshot by date, or the latest one."""
+    pg = await get_pg()
+    if trade_date:
+        row = await pg.fetchrow(
+            "SELECT * FROM finance_control.fc_market_sentiment_snapshot WHERE trade_date = $1",
+            trade_date,
+        )
+    else:
+        row = await pg.fetchrow(
+            "SELECT * FROM finance_control.fc_market_sentiment_snapshot ORDER BY trade_date DESC LIMIT 1"
+        )
+    if not row:
+        return None
+    result = dict(row)
+    for key in ("us_markets", "china_concepts_idx", "ftse_a50", "prev_day_money_flow"):
+        val = result.get(key)
+        if isinstance(val, str):
+            try:
+                result[key] = _json_mod.loads(val)
+            except Exception:
+                pass
+    return result
+
+
+# ── fc_stock_snapshot ──────────────────────────────────────────────
+
+
+async def insert_stock_snapshot(
+    stock_code: str,
+    trade_date: date,
+    macro_signals: dict[str, Any] | None,
+    fundamental_data: dict[str, Any] | None,
+    kronos_prediction: dict[str, Any] | None,
+    generated_content: str | None,
+    status: str = "PENDING",
+) -> int:
+    """Insert a daily stock snapshot into fc_stock_snapshot."""
+    pg = await get_pg()
+    row = await pg.fetchrow(
+        """
+        INSERT INTO finance_control.fc_stock_snapshot
+            (stock_code, trade_date, macro_signals, fundamental_data,
+             kronos_prediction, generated_content, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id
+        """,
+        stock_code,
+        trade_date,
+        _json_mod.dumps(macro_signals or {}),
+        _json_mod.dumps(fundamental_data or {}),
+        _json_mod.dumps(kronos_prediction or {}),
+        generated_content,
+        status,
+    )
+    snapshot_id = row["id"] if row else 0
+    log.info("inserted stock_snapshot id=%d code=%s date=%s", snapshot_id, stock_code, trade_date)
+    return snapshot_id
+
+
+async def get_stock_snapshots(
+    stock_code: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Query stock snapshots from fc_stock_snapshot."""
+    pg = await get_pg()
+    where_clauses: list[str] = []
+    params: list[Any] = []
+
+    if stock_code:
+        where_clauses.append(f"stock_code = ${len(params) + 1}")
+        params.append(stock_code)
+    if status:
+        where_clauses.append(f"status = ${len(params) + 1}")
+        params.append(status)
+
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    rows = await pg.fetch(
+        f"""
+        SELECT id, stock_code, trade_date, macro_signals, fundamental_data,
+               kronos_prediction, generated_content, status, created_at, updated_at
+        FROM finance_control.fc_stock_snapshot{where_sql}
+        ORDER BY trade_date DESC, stock_code
+        LIMIT ${len(params) + 1}
+        """,
+        *params, limit,
+    )
+    return [dict(r) for r in rows]
+
+
+# ── fc_workflow_config ─────────────────────────────────────────────
+
+
+async def get_active_workflows() -> list[dict[str, Any]]:
+    """Get all active workflow configurations from fc_workflow_config."""
+    pg = await get_pg()
+    rows = await pg.fetch(
+        """
+        SELECT task_id, is_active, cron_expression, kronos_params,
+               valuecell_filters, llm_prompt_template, updated_at
+        FROM finance_control.fc_workflow_config
+        WHERE is_active = TRUE
+        ORDER BY task_id
+        """
+    )
+    result: list[dict[str, Any]] = []
+    for r in rows:
+        row_dict = dict(r)
+        for key in ("kronos_params", "valuecell_filters"):
+            val = row_dict.get(key)
+            if isinstance(val, str):
+                try:
+                    row_dict[key] = _json_mod.loads(val)
+                except Exception:
+                    pass
+        result.append(row_dict)
+    return result
+
+
+async def update_workflow_config(
+    task_id: str,
+    is_active: bool | None = None,
+    kronos_params: dict[str, Any] | None = None,
+    valuecell_filters: dict[str, Any] | None = None,
+    llm_prompt_template: str | None = None,
+) -> None:
+    """Update a workflow configuration in fc_workflow_config."""
+    pg = await get_pg()
+    sets: list[str] = []
+    params: list[Any] = []
+
+    if is_active is not None:
+        sets.append(f"is_active = ${len(params) + 1}")
+        params.append(is_active)
+    if kronos_params is not None:
+        sets.append(f"kronos_params = ${len(params) + 1}")
+        params.append(_json_mod.dumps(kronos_params))
+    if valuecell_filters is not None:
+        sets.append(f"valuecell_filters = ${len(params) + 1}")
+        params.append(_json_mod.dumps(valuecell_filters))
+    if llm_prompt_template is not None:
+        sets.append(f"llm_prompt_template = ${len(params) + 1}")
+        params.append(llm_prompt_template)
+
+    if not sets:
+        return
+
+    sets.append(f"updated_at = ${len(params) + 1}")
+    params.append(None)  # will be set by DEFAULT in SQL, but we need a param slot
+
+    await pg.execute(
+        f"""
+        UPDATE finance_control.fc_workflow_config
+        SET {', '.join(sets)}
+        WHERE task_id = ${len(params) + 1}
+        """,
+        *params, task_id,
+    )
+    log.info("updated workflow config for %s", task_id)
