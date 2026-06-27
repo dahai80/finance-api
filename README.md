@@ -191,7 +191,8 @@ finance-api/
 │   ├── backtest.py        # 策略回测
 │   └── ws.py              # WebSocket 实时推送
 ├── data_provider/         # 数据源与算法
-│   ├── akshare_fetcher.py # AkShare 数据抓取
+│   ├── akshare_fetcher.py # AkShare 实时数据抓取
+│   ├── tushare_fetcher.py # Tushare 历史数据抓取
 │   ├── ipo_scorer.py      # IPO 五维评分
 │   ├── industry_map.py    # 行业热度映射
 │   ├── llm_generator.py   # LLM 脚本生成
@@ -199,13 +200,14 @@ finance-api/
 │   └── backtest_engine.py # 回测引擎
 ├── sql/                   # 数据库脚本
 │   └── init.sql           # DDL 建表语句
-├── tests/                 # 测试用例
+├── tests/                 # 测试用例 (40 passed, 1 skipped)
 │   ├── test_api.py        # IPO API 测试
 │   ├── test_db.py         # 数据库测试
 │   ├── test_fetcher.py    # 数据抓取测试
 │   ├── test_industry.py   # 行业 API 测试
 │   ├── test_market.py     # 市场 API 测试
-│   └── test_backtest.py   # 回测 API 测试
+│   ├── test_backtest.py   # 回测 API 测试
+│   └── test_tushare.py    # Tushare 数据源测试
 ├── requirements.txt       # Python 依赖
 └── README.md            # 本文档
 ```
