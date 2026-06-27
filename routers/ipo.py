@@ -12,9 +12,17 @@ log = get_logger("finance.ipo")
 
 
 @router.get("")
-async def list_ipo(limit: int = 50) -> list[dict]:
-    log.info("GET /api/ipo limit=%d", limit)
-    return await storage.list_ipo(limit=limit)
+async def list_ipo(
+    limit: int = 50,
+    offset: int = 0,
+    status: str | None = None,
+    min_score: int | None = None,
+    search: str | None = None,
+) -> dict:
+    log.info("GET /api/ipo limit=%d offset=%d status=%s search=%s", limit, offset, status, search)
+    rows = await storage.list_ipo(limit=limit, offset=offset, status=status, min_score=min_score, search=search)
+    total = await storage.count_ipo(status=status, min_score=min_score, search=search)
+    return {"data": rows, "total": total, "limit": limit, "offset": offset}
 
 
 @router.post("/sync")

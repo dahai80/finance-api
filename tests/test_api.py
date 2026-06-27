@@ -1,16 +1,15 @@
 import pytest
-import pytest_asyncio
-import httpx
-import asyncpg
+from fastapi.testclient import TestClient
 
 from config import settings
+from main import app
 
-BASE_URL = "http://127.0.0.1:8000"
 
-
-@pytest.fixture
+@pytest.fixture(scope="module")
 def client():
-    return httpx.Client(base_url=BASE_URL, timeout=10)
+    settings.akshare_mock = True
+    with TestClient(app) as c:
+        yield c
 
 
 def test_health(client):
@@ -31,7 +30,12 @@ def test_root(client):
 def test_ipo_list(client):
     r = client.get("/api/ipo")
     assert r.status_code == 200
-    assert isinstance(r.json(), list)
+    body = r.json()
+    assert isinstance(body, dict)
+    assert isinstance(body["data"], list)
+    assert isinstance(body["total"], int)
+    assert body["limit"] == 50
+    assert body["offset"] == 0
 
 
 def test_ipo_sync(client):
@@ -40,13 +44,14 @@ def test_ipo_sync(client):
     body = r.json()
     assert body["mock"] is True
     assert body["synced"] >= 1
+    assert body["scored"] == body["synced"]
 
 
 def test_ipo_list_after_sync(client):
     client.post("/api/ipo/sync")
     r = client.get("/api/ipo")
     assert r.status_code == 200
-    rows = r.json()
+    rows = r.json()["data"]
     assert len(rows) >= 1
     first = rows[0]
     assert "stock_code" in first
