@@ -96,6 +96,20 @@ async def upsert_ipo(items: list[dict[str, Any]]) -> int:
     return upserted
 
 
+async def update_ipo_score(stock_code: str, total: int, recommendation: str) -> None:
+    pg = await get_pg()
+    await pg.execute(
+        """
+        UPDATE finance_control.fc_ipo_factory
+        SET valuation_score = $1, recommendation_level = $2
+        WHERE stock_code = $3
+        """,
+        total,
+        recommendation,
+        stock_code,
+    )
+
+
 async def replace_live_money_flow(items: list[dict[str, Any]]) -> None:
     r = await get_redis()
     key = "openclaw:finance:live:market_money_flow"
