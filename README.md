@@ -224,4 +224,4 @@ finance-api/
 
 ## 许可证
 
-Internal use only.
+MIT License.
