@@ -54,12 +54,12 @@ async def _job_money_flow() -> None:
     try:
         import akshare as ak
 
-        df = ak.stock_sector_fund_flow_daily(symbol="A股")
+        df = ak.stock_fund_flow_industry()
         if df is not None and not df.empty:
             items = []
             for _, row in df.iterrows():
-                sector = str(row.get("板块名称", row.get("sector", "")))
-                flow_val = row.get("实际流入资金") or row.get("net_inflow", 0)
+                sector = str(row.get("行业", row.get("行业名称", "")))
+                flow_val = row.get("净额") or row.get("实际流入资金", 0)
                 try:
                     flow = float(str(flow_val).replace(",", ""))
                 except Exception:
@@ -76,6 +76,65 @@ async def _job_money_flow() -> None:
                 })
     except Exception as exc:
         log.exception("money_flow failed")
+
+
+async def _job_premarket_sentiment() -> None:
+    """08:30 盘前情绪快照 — 收集美股收盘、概念指数、A50数据"""
+    log.info("scheduled job: premarket_sentiment")
+    try:
+        import akshare as ak
+        from datetime import date
+
+        us_markets: dict[str, Any] = {}
+        china_concepts: dict[str, Any] = {}
+        ftse_a50: dict[str, Any] = {}
+
+        # ── SPY (US market proxy) ──────────────────────────────
+        try:
+            df = ak.stock_us_index_daily(symbol="SPY")
+            if df is not None and not df.empty:
+                last = df.iloc[-1]
+                us_markets["spy_close"] = float(last.get("收盘", last.get("close", 0)))
+                us_markets["spy_change"] = float(last.get("涨跌幅", last.get("change_pct", 0)))
+        except Exception:
+            pass
+
+        # ── KWEB (China concept stocks ETF) ─────────────────────
+        try:
+            df = ak.stock_us_hist(symbol="KWEB")
+            if df is not None and not df.empty:
+                last = df.iloc[-1]
+                china_concepts["kweb_close"] = float(last.get("收盘", last.get("close", 0)))
+                china_concepts["kweb_change"] = float(last.get("涨跌幅", last.get("change_pct", 0)))
+        except Exception:
+            pass
+
+        # ── FTSE China A50 (ETF code: 510050) ──────────────────
+        try:
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                for _, row in df.iterrows():
+                    code = str(row.get("代码", "")).strip()
+                    if code == "510050":
+                        ftse_a50["close"] = float(row.get("最新价", 0))
+                        ftse_a50["change_pct"] = float(row.get("涨跌幅", 0))
+                        ftse_a50["name"] = str(row.get("名称", "A50"))
+                        break
+        except Exception:
+            pass
+
+        prev_flow = await storage.get_live_money_flow(20)
+
+        await storage.upsert_sentiment_snapshot(
+            trade_date=date.today(),
+            us_markets=us_markets or {"status": "no_data"},
+            china_concepts_idx=china_concepts or {"status": "no_data"},
+            ftse_a50=ftse_a50 or {"status": "no_data"},
+            prev_day_money_flow=prev_flow,
+        )
+        log.info("premarket_sentiment: snapshot saved for %s", date.today())
+    except Exception as exc:
+        log.exception("premarket_sentiment failed")
 
 
 async def _job_daily_content() -> None:
@@ -117,11 +176,12 @@ async def _job_daily_content() -> None:
 
 def init_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(_job_ipo_sync, CronTrigger(day_of_week="mon-fri", hour=8, minute=0), id="ipo_sync")
+    scheduler.add_job(_job_premarket_sentiment, CronTrigger(day_of_week="mon-fri", hour=8, minute=30), id="premarket_sentiment")
     scheduler.add_job(
         _job_money_flow,
         CronTrigger(day_of_week="mon-fri", hour="9-14", minute="*/5"),
         id="money_flow",
     )
     scheduler.add_job(_job_daily_content, CronTrigger(day_of_week="mon-fri", hour=15, minute=15), id="daily_content")
-    log.info("scheduler: 3 jobs registered (ipo_sync, money_flow, daily_content)")
+    log.info("scheduler: 4 jobs registered (ipo_sync, premarket_sentiment, money_flow, daily_content)")
     return scheduler

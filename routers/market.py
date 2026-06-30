@@ -124,3 +124,102 @@ async def get_stock_snapshots(
     """Get stock snapshots from fc_stock_snapshot."""
     log.info("GET /api/market/snapshots code=%s status=%s limit=%d", stock_code, status, limit)
     return await storage.get_stock_snapshots(stock_code=stock_code, status=status, limit=limit)
+
+
+@router.post("/trigger/money-flow")
+async def trigger_money_flow() -> dict[str, Any]:
+    """Manually trigger money flow data fetch."""
+    log.info("POST /api/market/trigger/money-flow")
+    try:
+        import akshare as ak
+
+        df = ak.stock_fund_flow_industry()
+        if df is not None and not df.empty:
+            items = []
+            for _, row in df.iterrows():
+                sector = str(row.get("行业", row.get("行业名称", "")))
+                flow_val = row.get("净额") or row.get("实际流入资金", 0)
+                try:
+                    flow = float(str(flow_val).replace(",", ""))
+                except Exception:
+                    flow = 0.0
+                items.append({"sector": sector, "flow": flow})
+            if items:
+                await storage.replace_live_money_flow(items)
+                log.info("trigger money_flow: refreshed %d sectors", len(items))
+                return {"status": "ok", "count": len(items)}
+        return {"status": "ok", "count": 0, "message": "no data returned from AkShare"}
+    except Exception as exc:
+        log.exception("trigger money_flow failed")
+        return {"status": "error", "message": str(exc)}
+
+
+@router.post("/trigger/sentiment")
+async def trigger_sentiment() -> dict[str, Any]:
+    """Manually trigger premarket sentiment data fetch."""
+    log.info("POST /api/market/trigger/sentiment")
+    try:
+        import akshare as ak
+        from datetime import date
+
+        us_markets: dict[str, Any] = {}
+        china_concepts: dict[str, Any] = {}
+        ftse_a50: dict[str, Any] = {}
+
+        # SPY (US market proxy)
+        try:
+            df = ak.stock_us_index_daily(symbol="SPY")
+            if df is not None and not df.empty:
+                last = df.iloc[-1]
+                us_markets["spy_close"] = float(last.get("收盘", last.get("close", 0)))
+                us_markets["spy_change"] = float(last.get("涨跌幅", last.get("change_pct", 0)))
+        except Exception:
+            pass
+
+        # KWEB (China concept stocks ETF)
+        try:
+            df = ak.stock_us_hist(symbol="KWEB")
+            if df is not None and not df.empty:
+                last = df.iloc[-1]
+                china_concepts["kweb_close"] = float(last.get("收盘", last.get("close", 0)))
+                china_concepts["kweb_change"] = float(last.get("涨跌幅", last.get("change_pct", 0)))
+        except Exception:
+            pass
+
+        # FTSE China A50 (ETF code: 510050)
+        try:
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                for _, row in df.iterrows():
+                    code = str(row.get("代码", "")).strip()
+                    if code == "510050":
+                        ftse_a50["close"] = float(row.get("最新价", 0))
+                        ftse_a50["change_pct"] = float(row.get("涨跌幅", 0))
+                        ftse_a50["name"] = str(row.get("名称", "A50"))
+                        break
+        except Exception:
+            pass
+
+        prev_flow = await storage.get_live_money_flow(20)
+
+        await storage.upsert_sentiment_snapshot(
+            trade_date=date.today(),
+            us_markets=us_markets or {"status": "no_data"},
+            china_concepts_idx=china_concepts or {"status": "no_data"},
+            ftse_a50=ftse_a50 or {"status": "no_data"},
+            prev_day_money_flow=prev_flow,
+        )
+        log.info("trigger sentiment: snapshot saved for %s", date.today())
+        return {"status": "ok", "date": date.today().isoformat()}
+    except Exception as exc:
+        log.exception("trigger sentiment failed")
+        return {"status": "error", "message": str(exc)}
+
+
+@router.post("/trigger/all")
+async def trigger_all() -> dict[str, Any]:
+    """Manually trigger money flow + sentiment data fetch."""
+    log.info("POST /api/market/trigger/all")
+    mf_result = await trigger_money_flow()
+    sent_result = await trigger_sentiment()
+    return {"money_flow": mf_result, "sentiment": sent_result}

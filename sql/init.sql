@@ -68,6 +68,17 @@ CREATE TABLE finance_control.fc_market_sentiment_snapshot (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE finance_control.fc_watchlist (
+    id             SERIAL PRIMARY KEY,
+    stock_code     VARCHAR(10) NOT NULL UNIQUE,
+    stock_name     VARCHAR(50)  NOT NULL,
+    industry       VARCHAR(50),
+    note           TEXT,
+    added_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    cached_details JSONB,
+    cached_at      TIMESTAMPTZ
+);
+
 INSERT INTO finance_control.fc_workflow_config (task_id, cron_expression, llm_prompt_template)
 VALUES ('ipo_sync_daily', '0 8 * * 1-5', '为新股 {stock_name}({stock_code}) 生成打新短视频分镜脚本。')
 ON CONFLICT (task_id) DO NOTHING;

@@ -214,9 +214,9 @@ async def replace_live_money_flow(items: list[dict[str, Any]]) -> None:
     r = await get_redis()
     key = "openclaw:finance:live:market_money_flow"
     async with r.pipeline() as pipe:
-        pipe.delete(key)
+        await pipe.delete(key)
         for it in items:
-            pipe.zadd(key, {str(it["sector"]): float(it["flow"])})
+            await pipe.zadd(key, {str(it["sector"]): float(it["flow"])})
         await pipe.execute()
     await r.publish("openclaw:finance:live:stream_trigger", "UPDATE")
     log.info("redis zset %s refreshed, %d items", key, len(items))
@@ -522,3 +522,107 @@ async def update_workflow_config(
         *params, task_id,
     )
     log.info("updated workflow config for %s", task_id)
+
+
+# ── fc_watchlist ───────────────────────────────────────────────────
+
+
+async def get_watchlist() -> list[dict[str, Any]]:
+    """Return all watchlist items ordered by added_at DESC."""
+    pg = await get_pg()
+    rows = await pg.fetch(
+        """
+        SELECT id, stock_code, stock_name, industry, note,
+               added_at, cached_details, cached_at
+        FROM finance_control.fc_watchlist
+        ORDER BY added_at DESC
+        """
+    )
+    result: list[dict[str, Any]] = []
+    for r in rows:
+        row_dict = dict(r)
+        cd = row_dict.get("cached_details")
+        if isinstance(cd, str):
+            try:
+                row_dict["cached_details"] = _json_mod.loads(cd)
+            except Exception:
+                pass
+        result.append(row_dict)
+    return result
+
+
+async def count_watchlist() -> int:
+    pg = await get_pg()
+    row = await pg.fetchval("SELECT COUNT(*) FROM finance_control.fc_watchlist")
+    return row or 0
+
+
+async def add_to_watchlist(
+    stock_code: str,
+    stock_name: str,
+    industry: str | None = None,
+    note: str | None = None,
+) -> int:
+    pg = await get_pg()
+    row = await pg.fetchrow(
+        """
+        INSERT INTO finance_control.fc_watchlist (stock_code, stock_name, industry, note)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (stock_code) DO UPDATE SET
+            stock_name = EXCLUDED.stock_name,
+            industry = EXCLUDED.industry,
+            note = EXCLUDED.note
+        RETURNING id
+        """,
+        stock_code, stock_name, industry, note,
+    )
+    wid = row["id"] if row else 0
+    log.info("added to watchlist id=%d code=%s name=%s", wid, stock_code, stock_name)
+    return wid
+
+
+async def remove_from_watchlist(stock_code: str) -> bool:
+    pg = await get_pg()
+    result = await pg.execute(
+        "DELETE FROM finance_control.fc_watchlist WHERE stock_code = $1",
+        stock_code,
+    )
+    deleted = "DELETE 1" in result
+    log.info("removed from watchlist code=%s deleted=%s", stock_code, deleted)
+    return deleted
+
+
+async def update_watchlist_cache(stock_code: str, details: dict[str, Any]) -> None:
+    pg = await get_pg()
+    await pg.execute(
+        """
+        UPDATE finance_control.fc_watchlist
+        SET cached_details = $1, cached_at = NOW()
+        WHERE stock_code = $2
+        """,
+        _json_mod.dumps(details),
+        stock_code,
+    )
+
+
+async def get_watchlist_item(stock_code: str) -> dict[str, Any] | None:
+    pg = await get_pg()
+    row = await pg.fetchrow(
+        """
+        SELECT id, stock_code, stock_name, industry, note,
+               added_at, cached_details, cached_at
+        FROM finance_control.fc_watchlist
+        WHERE stock_code = $1
+        """,
+        stock_code,
+    )
+    if not row:
+        return None
+    row_dict = dict(row)
+    cd = row_dict.get("cached_details")
+    if isinstance(cd, str):
+        try:
+            row_dict["cached_details"] = _json_mod.loads(cd)
+        except Exception:
+            pass
+    return row_dict

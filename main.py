@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_logger, settings
 import storage
-from routers import health, ipo, market, backtest, industry, ws
+from routers import health, ipo, market, backtest, industry, ws, watchlist
 from scheduler import init_scheduler
 
 log = get_logger("finance.main")
@@ -43,6 +43,7 @@ app.include_router(market.router)
 app.include_router(backtest.router)
 app.include_router(industry.router)
 app.include_router(ws.router)
+app.include_router(watchlist.router)
 
 
 @app.get("/")

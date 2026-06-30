@@ -137,14 +137,18 @@ def _search_stock_live(q: str) -> list[dict]:
             return []
 
         q_lower = q.lower().strip()
+        seen: set[str] = set()
         results: list[dict] = []
         for _, row in df.iterrows():
             code = str(row.get("code", "")).strip()
             name = str(row.get("name", "")).strip()
             if not code or not name:
                 continue
+            if code in seen:
+                continue
             if q_lower in code.lower() or q_lower in name.lower():
                 results.append({"stock_code": code, "stock_name": name})
+                seen.add(code)
             if len(results) >= 20:
                 break
         log.info("search_stock_live: q=%s found=%d", q, len(results))

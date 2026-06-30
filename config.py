@@ -20,7 +20,7 @@ class Settings:
             "FINANCE_REDIS_URL", "redis://localhost:6379/0"
         )
         self.tushare_token: str = os.environ.get("TUSHARE_TOKEN", "")
-        self.akshare_mock: bool = os.environ.get("FINANCE_AKSHARE_MOCK", "1") == "1"
+        self.akshare_mock: bool = os.environ.get("FINANCE_AKSHARE_MOCK", "0") == "1"
         self.cors_origins: list[str] = [
             o.strip() for o in
             os.environ.get("FINANCE_CORS_ORIGINS", "http://localhost:3000").split(",")
