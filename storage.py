@@ -338,6 +338,7 @@ async def upsert_sentiment_snapshot(
     china_concepts_idx: dict[str, Any],
     ftse_a50: dict[str, Any],
     prev_day_money_flow: list[dict[str, Any]],
+    prev_day_individual_flow: list[dict[str, Any]] | None = None,
 ) -> None:
     """Upsert daily market sentiment snapshot into fc_market_sentiment_snapshot."""
     pg = await get_pg()
