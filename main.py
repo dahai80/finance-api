@@ -17,20 +17,6 @@ from scheduler import init_scheduler
 log = get_logger("finance.main")
 
 
-async def exception_handler_middleware(request: Request, call_next):
-    """Global exception handler - catches unhandled errors and returns structured responses."""
-    try:
-        return await call_next(request)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        log.exception("Unhandled error on %s %s", request.method, request.url.path)
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(exc), "type": type(exc).__name__},
-        )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("finance-api startup, mock=%s force_real=%s", settings.akshare_mock, settings.force_real_data)
@@ -48,7 +34,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(exception_handler_middleware)
+
+@app.middleware("http")
+async def exception_handler_middleware(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("Unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc), "type": type(exc).__name__},
+        )
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

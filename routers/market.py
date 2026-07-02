@@ -83,12 +83,12 @@ async def get_realtime_quotes(codes: str) -> dict[str, Any]:
 
     try:
         quotes = await multi_source_fetcher.afetch_realtime_quotes(stock_codes)
-        if quotes:
-            return quotes
-        return {code: _mock_quote(code) for code in stock_codes}
+        # NEVER fall back to mock/random prices — stock price accuracy is critical.
+        # Return whatever real quotes were obtained (possibly partial/empty).
+        return quotes
     except Exception as exc:
         log.exception("quotes fetch failed")
-        return {code: _mock_quote(code) for code in stock_codes}
+        return {}
 
 
 @router.get("/alerts")
@@ -240,25 +240,11 @@ async def trigger_all() -> dict[str, Any]:
 
 
 # ── Mock Data ───────────────────────────────────────────────────────────
-
-def _mock_quote(code: str) -> dict[str, Any]:
-    import random
-    return {
-        "code": code,
-        "name": "",
-        "price": round(random.uniform(10, 200), 2),
-        "open": 0.0,
-        "high": 0.0,
-        "low": 0.0,
-        "pre_close": 0.0,
-        "change": round(random.uniform(-5, 5), 2),
-        "change_pct": round(random.uniform(-5, 5), 2),
-        "volume": 0.0,
-        "amount": 0.0,
-    }
-
+# NOTE: No mock for quotes — stock prices must never be fabricated.
 
 def _mock_individual_money_flow(limit: int) -> list[dict[str, Any]]:
+    """Fallback mock — field names MUST match the live fetcher and frontend
+    (stock_code/stock_name/main_net_inflow) so the dashboard renders consistently."""
     stocks = [
         ("600519", "贵州茅台"), ("000858", "五粮液"), ("601318", "中国平安"),
         ("000001", "平安银行"), ("600036", "招商银行"), ("002415", "海康威视"),
@@ -267,10 +253,7 @@ def _mock_individual_money_flow(limit: int) -> list[dict[str, Any]]:
     ]
     import random
     return [{
-        "code": s[0], "name": s[1],
-        "new_rank": i,
-        "main_net": round(random.uniform(-50, 200), 2),
-        "main_net_rate": round(random.uniform(-5, 10), 2),
-        "large_net": round(random.uniform(-30, 100), 2),
-        "large_net_rate": round(random.uniform(-3, 8), 2),
-    } for i, s in enumerate(stocks[:limit])]
+        "stock_code": s[0],
+        "stock_name": s[1],
+        "main_net_inflow": round(random.uniform(-50000000, 200000000), 2),
+    } for s in stocks[:limit]]

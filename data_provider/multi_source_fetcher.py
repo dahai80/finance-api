@@ -626,7 +626,11 @@ async def afetch_individual_money_flow(limit: int = 10) -> list[dict[str, Any]]:
 
 
 def _mock_individual_money_flow(limit: int = 10) -> list[dict[str, Any]]:
-    """Generate realistic mock individual stock money flow data."""
+    """Generate realistic mock individual stock money flow data.
+
+    Field names MUST match the live AkShare fetcher (stock_code/stock_name/main_net_inflow)
+    so the frontend renders consistently whether data is live or mock.
+    """
     stocks = [
         ("600519", "贵州茅台", 850000000),
         ("000858", "五粮液", 620000000),
@@ -651,42 +655,115 @@ def _mock_individual_money_flow(limit: int = 10) -> list[dict[str, Any]]:
     ]
 
 
+def _sina_code(code: str) -> str:
+    """Map a 6-digit A-share code to Sina hq prefix (sh/sz/bj)."""
+    if code.startswith(("60", "68", "9")):
+        return f"sh{code}"
+    if code.startswith(("4", "8")):
+        return f"bj{code}"
+    return f"sz{code}"
+
+
+def _fetch_realtime_quotes_sina(stock_codes: list[str]) -> dict[str, dict[str, Any]]:
+    """Fetch real-time quotes from Sina hq API — fast (~0.05s) and accurate.
+
+    Returns dict keyed by raw 6-digit code: {stock_code, stock_name, price, change_pct, ...}.
+    Never returns mock data; on failure returns partial/empty dict.
+    """
+    import requests
+
+    quotes: dict[str, dict[str, Any]] = {}
+    # Sina hq caps ~800 codes per request; batch to be safe
+    batch_size = 200
+    for i in range(0, len(stock_codes), batch_size):
+        batch = stock_codes[i:i + batch_size]
+        sina_codes = [_sina_code(c) for c in batch]
+        try:
+            resp = requests.get(
+                "http://hq.sinajs.cn/list=" + ",".join(sina_codes),
+                headers={"Referer": "https://finance.sina.com.cn"},
+                timeout=5,
+            )
+            resp.encoding = "gbk"
+            for raw_code, line in zip(batch, resp.text.strip().split("\n")):
+                if '="' not in line:
+                    continue
+                payload = line.split('"', 2)[1]
+                if not payload:
+                    continue
+                parts = payload.split(",")
+                if len(parts) < 9:
+                    continue
+                name = parts[0].strip()
+                preclose = _to_float(parts[2])
+                price = _to_float(parts[3])
+                if price <= 0 or preclose <= 0:
+                    continue
+                change_pct = (price - preclose) / preclose * 100 if preclose else 0.0
+                quotes[raw_code] = {
+                    "stock_code": raw_code,
+                    "stock_name": name,
+                    "price": round(price, 4),
+                    "open": _to_float(parts[1]),
+                    "pre_close": preclose,
+                    "high": _to_float(parts[4]),
+                    "low": _to_float(parts[5]),
+                    "change": round(price - preclose, 4),
+                    "change_pct": round(change_pct, 4),
+                    "volume": _to_float(parts[8]),
+                    "amount": _to_float(parts[9]) if len(parts) > 9 else 0.0,
+                }
+        except Exception as exc:
+            log.warning("Sina hq quotes batch failed: %s", exc)
+            continue
+
+    log.info("Sina hq quotes: %d/%d stocks fetched", len(quotes), len(stock_codes))
+    return quotes
+
+
 def fetch_realtime_quotes(stock_codes: list[str]) -> dict[str, dict[str, Any]]:
     """
-    Fetch real-time quotes for given stock codes from AkShare.
-    Returns dict keyed by stock_code: {price, change_pct, name}.
+    Fetch real-time quotes for given stock codes.
+    Order: Sina hq (fast/accurate) → AkShare spot (fallback).
+    Returns dict keyed by stock_code: {stock_code, stock_name, price, change_pct, ...}.
+    NEVER returns mock/random data — accuracy is critical for stock prices.
     """
-    if _breaker.is_open("akshare_spot"):
-        log.warning("AkShare spot circuit breaker is open, skipping")
+    if not stock_codes:
         return {}
 
-    try:
-        import akshare as ak
-        df = ak.stock_zh_a_spot_em()
-        if df is None or df.empty:
-            return {}
-
-        quotes: dict[str, dict[str, Any]] = {}
-        for _, row in df.iterrows():
-            code = str(row.get("代码", "")).strip()
-            if code in stock_codes:
-                name = str(row.get("名称", "")).strip()
-                price = _to_float(row.get("最新价", 0))
-                change = _to_float(row.get("涨跌幅", 0))
-                if code and price > 0:
-                    quotes[code] = {
-                        "stock_code": code,
-                        "stock_name": name,
-                        "price": price,
-                        "change_pct": change,
-                    }
+    # Primary: Sina hq — fast and accurate
+    quotes = _fetch_realtime_quotes_sina(stock_codes)
+    if quotes:
         _breaker.record_success("akshare_spot")
-        log.info("fetched realtime quotes for %d/%d stocks", len(quotes), len(stock_codes))
         return quotes
-    except Exception as exc:
-        _breaker.record_failure("akshare_spot")
-        log.warning("AkShare spot quotes failed: %s", exc)
-        return {}
+
+    # Fallback: AkShare whole-market spot (slow, may be network-blocked)
+    if not _breaker.is_open("akshare_spot"):
+        try:
+            import akshare as ak
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                for _, row in df.iterrows():
+                    code = str(row.get("代码", "")).strip()
+                    if code in stock_codes:
+                        price = _to_float(row.get("最新价", 0))
+                        if code and price > 0:
+                            quotes[code] = {
+                                "stock_code": code,
+                                "stock_name": str(row.get("名称", "")).strip(),
+                                "price": price,
+                                "change_pct": _to_float(row.get("涨跌幅", 0)),
+                            }
+                _breaker.record_success("akshare_spot")
+                log.info("AkShare spot fallback quotes: %d/%d stocks", len(quotes), len(stock_codes))
+                if quotes:
+                    return quotes
+        except Exception as exc:
+            _breaker.record_failure("akshare_spot")
+            log.warning("AkShare spot quotes failed: %s", exc)
+
+    log.warning("All quote sources failed for %d codes; returning empty (no mock)", len(stock_codes))
+    return {}
 
 
 async def afetch_realtime_quotes(stock_codes: list[str]) -> dict[str, dict[str, Any]]:
