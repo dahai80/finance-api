@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import math
+import queue
 import random
+import threading
 import time
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -17,28 +19,32 @@ log = get_logger("finance.multi_source")
 # ── Circuit breaker state ─────────────────────────────────────────────
 
 class _CircuitBreaker:
-    """Simple circuit breaker: after N consecutive failures, skip for cooldown seconds."""
+    # Simple circuit breaker: after N consecutive failures, skip for cooldown seconds.
 
     def __init__(self, failure_threshold: int = 3, cooldown_seconds: float = 300.0):
         self._failure_threshold = failure_threshold
         self._cooldown_seconds = cooldown_seconds
         self._failures: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
 
     def record_success(self, key: str) -> None:
-        self._failures.pop(key, None)
+        with self._lock:
+            self._failures.pop(key, None)
 
     def record_failure(self, key: str) -> None:
-        if key not in self._failures:
-            self._failures[key] = []
-        self._failures[key].append(time.time())
+        with self._lock:
+            if key not in self._failures:
+                self._failures[key] = []
+            self._failures[key].append(time.time())
 
     def is_open(self, key: str) -> bool:
-        failures = self._failures.get(key, [])
-        now = time.time()
-        # Keep only recent failures within cooldown window
-        recent = [t for t in failures if now - t < self._cooldown_seconds]
-        self._failures[key] = recent
-        return len(recent) >= self._failure_threshold
+        with self._lock:
+            failures = self._failures.get(key, [])
+            now = time.time()
+            # Keep only recent failures within cooldown window
+            recent = [t for t in failures if now - t < self._cooldown_seconds]
+            self._failures[key] = recent
+            return len(recent) >= self._failure_threshold
 
 
 _breaker = _CircuitBreaker()
@@ -64,8 +70,33 @@ async def async_random_delay(min_s: float = 0.5, max_s: float = 2.0) -> None:
 
 
 def _random_delay(min_s: float = 0.5, max_s: float = 2.0) -> None:
-    """Random delay to avoid rate limiting."""
+    # Random delay to avoid rate limiting.
     time.sleep(random.uniform(min_s, max_s))
+
+
+def _call_with_timeout(func, timeout: float, *args, **kwargs):
+    # Run a blocking call in a daemon thread with a hard timeout. signal.alarm
+    # only works in the main thread; this runs from any thread (incl. executor
+    # workers). On timeout the daemon worker is abandoned — it cannot block
+    # interpreter shutdown.
+    q: "queue.Queue" = queue.Queue()
+
+    def _worker():
+        try:
+            q.put(("ok", func(*args, **kwargs)))
+        except Exception as exc:
+            q.put(("err", exc))
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    try:
+        kind, val = q.get(timeout=timeout)
+    except queue.Empty:
+        log.warning("call timed out after %.1fs, abandoned worker", timeout)
+        return None
+    if kind == "err":
+        raise val
+    return val
 
 
 # ── Money Flow Fetchers ───────────────────────────────────────────────
@@ -341,7 +372,6 @@ def _fetch_industry_top_stocks_akshare(limit: int = 10) -> list[dict[str, Any]]:
 
     try:
         import akshare as ak
-        import signal
 
         _random_delay()
         df = ak.stock_board_industry_name_em()
@@ -370,21 +400,13 @@ def _fetch_industry_top_stocks_akshare(limit: int = 10) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         seen: set[str] = set()
 
-        def _handler(signum, frame):
-            raise TimeoutError("industry cons fetch timed out")
-
         for _, row in df.iterrows():
             industry = str(row.get("行业名称", row.get("industry", ""))).strip()
             if not industry or industry in seen:
                 continue
 
             try:
-                signal.signal(signal.SIGALRM, _handler)
-                signal.alarm(5)
-                try:
-                    stock_df = ak.stock_board_industry_cons_em(symbol=industry)
-                finally:
-                    signal.alarm(0)
+                stock_df = _call_with_timeout(ak.stock_board_industry_cons_em, 5.0, symbol=industry)
                 if stock_df is not None and not stock_df.empty:
                     stocks = []
                     for _, s in stock_df.head(limit).iterrows():
@@ -405,8 +427,8 @@ def _fetch_industry_top_stocks_akshare(limit: int = 10) -> list[dict[str, Any]]:
                     if stocks:
                         seen.add(industry)
                         results.append({"industry": industry, "stocks": stocks})
-            except (TimeoutError, Exception):
-                pass
+            except Exception as exc:
+                log.debug("industry cons fetch skipped %s: %s", industry, exc)
 
             if len(results) >= 10:
                 break
@@ -884,6 +906,7 @@ async def afetch_industry_news(limit: int = 20, industry: str | None = None) -> 
 _GROUPED_CACHE: dict[str, Any] = {"data": [], "ts": 0.0}
 _GROUPED_TTL = 600.0  # 10 minutes
 _GROUPED_PER_INDUSTRY = 6  # news items kept per industry
+_GROUPED_LOCK = threading.Lock()
 
 
 def _fetch_one_industry_news(industry: str, per: int) -> dict[str, Any]:
@@ -896,11 +919,8 @@ def _fetch_one_industry_news(industry: str, per: int) -> dict[str, Any]:
 
 
 def fetch_all_industry_news_grouped(per_industry: int = _GROUPED_PER_INDUSTRY) -> list[dict[str, Any]]:
-    """Fetch latest news for every industry in parallel via a thread pool.
-
-    Returns a list of {industry, items, count} sorted by industry name.
-    Each item carries an `industry` tag so the frontend can group freely.
-    """
+    # Fetch latest news for every industry in parallel via a thread pool.
+    # Returns a list of {industry, items, count} sorted by industry name.
     from concurrent.futures import ThreadPoolExecutor
 
     industries = list(INDUSTRY_STOCK_MAP.keys())
@@ -913,8 +933,9 @@ def fetch_all_industry_news_grouped(per_industry: int = _GROUPED_PER_INDUSTRY) -
             except Exception as exc:
                 log.warning("grouped industry news future failed: %s", exc)
     results.sort(key=lambda r: r["industry"])
-    _GROUPED_CACHE["data"] = results
-    _GROUPED_CACHE["ts"] = time.time()
+    with _GROUPED_LOCK:
+        _GROUPED_CACHE["data"] = results
+        _GROUPED_CACHE["ts"] = time.time()
     total = sum(r.get("count", 0) for r in results)
     log.info("grouped industry news refreshed: %d industries, %d items total", len(results), total)
     return results
@@ -926,14 +947,17 @@ async def afetch_all_industry_news_grouped(per_industry: int = _GROUPED_PER_INDU
 
 
 def get_cached_industry_news_grouped() -> dict[str, Any]:
-    """Return cached grouped news with freshness metadata. Stale cache is still
-    returned (better than empty) but `stale=True` flags it for the caller."""
+    # Return cached grouped news with freshness metadata. Stale cache is still
+    # returned (better than empty) but `stale=True` flags it for the caller.
+    with _GROUPED_LOCK:
+        data = _GROUPED_CACHE["data"]
+        ts = _GROUPED_CACHE["ts"]
     now = time.time()
-    age = now - _GROUPED_CACHE["ts"] if _GROUPED_CACHE["ts"] else float("inf")
+    age = now - ts if ts else float("inf")
     return {
-        "data": _GROUPED_CACHE["data"],
-        "updated_at": _GROUPED_CACHE["ts"],
-        "age_seconds": round(age, 1) if _GROUPED_CACHE["ts"] else None,
+        "data": data,
+        "updated_at": ts,
+        "age_seconds": round(age, 1) if ts else None,
         "stale": age > _GROUPED_TTL,
         "ttl_seconds": _GROUPED_TTL,
     }

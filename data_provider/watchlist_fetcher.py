@@ -161,13 +161,14 @@ def _search_stock_live(q: str) -> list[dict]:
         return []
 
 
-def _fetch_industry_rank_live(stock_code: str) -> dict:
-    """Fetch industry ranking for a stock using AkShare."""
+def _fetch_industry_rank_live(stock_code: str) -> tuple[dict, bool]:
+    # Returns (data, is_mock). is_mock=True signals fabricated fallback data.
     try:
         import akshare as ak
         df = ak.stock_fund_flow_industry()
         if df is None or df.empty:
-            return _mock_industry_rank()
+            log.warning("industry rank empty for %s, returning mock", stock_code)
+            return _mock_industry_rank(), True
 
         industry_name = "未知"
         rank = 0
@@ -189,14 +190,15 @@ def _fetch_industry_rank_live(stock_code: str) -> dict:
             "total_in_industry": total,
             "industry_name": industry_name,
             "pe_vs_industry": 0.85,
-        }
+        }, False
     except Exception:
         log.exception("fetch_industry_rank_live failed for %s", stock_code)
-        return _mock_industry_rank()
+        return _mock_industry_rank(), True
 
 
-def _fetch_disclosed_info_live(stock_code: str) -> dict:
-    """Fetch disclosed company information."""
+def _fetch_disclosed_info_live(stock_code: str) -> tuple[dict, bool]:
+    # Returns (data, is_mock). Financials are always mock (no live source) —
+    # flagged so the UI never presents them as authoritative.
     try:
         import akshare as ak
         announcements = []
@@ -227,14 +229,15 @@ def _fetch_disclosed_info_live(stock_code: str) -> dict:
             },
             "announcements": announcements,
             "next_report_date": None,
-        }
+        }, False
     except Exception:
         log.exception("fetch_disclosed_info_live failed for %s", stock_code)
-        return _mock_disclosed_info()
+        return _mock_disclosed_info(), True
 
 
-def _fetch_price_history_live(stock_code: str, days: int = 90) -> dict:
-    """Fetch historical K-line data."""
+def _fetch_price_history_live(stock_code: str, days: int = 90) -> tuple[dict, bool]:
+    # Returns (data, is_mock). Price accuracy is critical — mock K-line is
+    # flagged so it is never shown as a real quote.
     try:
         import akshare as ak
         end_date = date.today().isoformat()
@@ -247,7 +250,8 @@ def _fetch_price_history_live(stock_code: str, days: int = 90) -> dict:
             end_date=end_date,
         )
         if df is None or df.empty:
-            return _mock_price_history(days)
+            log.warning("price history empty for %s, returning mock", stock_code)
+            return _mock_price_history(days), True
 
         kline: list[dict] = []
         for _, row in df.iterrows():
@@ -261,7 +265,8 @@ def _fetch_price_history_live(stock_code: str, days: int = 90) -> dict:
             })
 
         if not kline:
-            return _mock_price_history(days)
+            log.warning("price history kline empty for %s, returning mock", stock_code)
+            return _mock_price_history(days), True
 
         start_price = kline[0]["close"]
         end_price = kline[-1]["close"]
@@ -281,23 +286,24 @@ def _fetch_price_history_live(stock_code: str, days: int = 90) -> dict:
                 "low_3m": round(min(lows), 2),
                 "avg_volume": round(sum(volumes) / len(volumes), 0),
             },
-        }
+        }, False
     except Exception:
         log.exception("fetch_price_history_live failed for %s", stock_code)
-        return _mock_price_history(days)
+        return _mock_price_history(days), True
 
 
-def _fetch_capital_flow_live(stock_code: str) -> dict:
-    """Fetch capital flow data for a stock."""
+def _fetch_capital_flow_live(stock_code: str) -> tuple[dict, bool]:
+    # Returns (data, is_mock).
     try:
         import akshare as ak
         df = ak.stock_individual_fund_flow(stock=stock_code)
         if df is None or df.empty:
-            return _mock_capital_flow()
+            log.warning("capital flow empty for %s, returning mock", stock_code)
+            return _mock_capital_flow(), True
 
         last = df.iloc[-1] if len(df) > 0 else None
         if last is None:
-            return _mock_capital_flow()
+            return _mock_capital_flow(), True
 
         today = {
             "main_net_inflow": float(last.get("主力净流入", 0) or 0),
@@ -313,19 +319,20 @@ def _fetch_capital_flow_live(stock_code: str) -> dict:
                 "main_net_inflow": float(row.get("主力净流入", 0) or 0),
             })
 
-        return {"today": today, "recent_5_days": recent_5}
+        return {"today": today, "recent_5_days": recent_5}, False
     except Exception:
         log.exception("fetch_capital_flow_live failed for %s", stock_code)
-        return _mock_capital_flow()
+        return _mock_capital_flow(), True
 
 
-def _fetch_sentiment_live(stock_code: str) -> dict:
-    """Fetch sentiment analysis based on news."""
+def _fetch_sentiment_live(stock_code: str) -> tuple[dict, bool]:
+    # Returns (data, is_mock).
     try:
         import akshare as ak
         df = ak.stock_news_em(symbol=stock_code)
         if df is None or df.empty:
-            return _mock_sentiment()
+            log.warning("sentiment news empty for %s, returning mock", stock_code)
+            return _mock_sentiment(), True
 
         news_items: list[dict] = []
         positive_count = 0
@@ -370,10 +377,10 @@ def _fetch_sentiment_live(stock_code: str) -> dict:
             "positive_count": positive_count,
             "negative_count": negative_count,
             "recent_news": news_items[:5],
-        }
+        }, False
     except Exception:
         log.exception("fetch_sentiment_live failed for %s", stock_code)
-        return _mock_sentiment()
+        return _mock_sentiment(), True
 
 
 def _classify_sentiment(text: str) -> str:
@@ -407,38 +414,40 @@ def search_stock(q: str) -> list[dict]:
     return _search_stock_live(q)
 
 
-def fetch_industry_rank(stock_code: str) -> dict:
+def fetch_industry_rank(stock_code: str) -> tuple[dict, bool]:
     if settings.akshare_mock:
-        return _mock_industry_rank()
+        return _mock_industry_rank(), True
     return _fetch_industry_rank_live(stock_code)
 
 
-def fetch_disclosed_info(stock_code: str) -> dict:
+def fetch_disclosed_info(stock_code: str) -> tuple[dict, bool]:
     if settings.akshare_mock:
-        return _mock_disclosed_info()
+        return _mock_disclosed_info(), True
     return _fetch_disclosed_info_live(stock_code)
 
 
-def fetch_price_history(stock_code: str, days: int = 90) -> dict:
+def fetch_price_history(stock_code: str, days: int = 90) -> tuple[dict, bool]:
     if settings.akshare_mock:
-        return _mock_price_history(days)
+        return _mock_price_history(days), True
     return _fetch_price_history_live(stock_code, days)
 
 
-def fetch_capital_flow(stock_code: str) -> dict:
+def fetch_capital_flow(stock_code: str) -> tuple[dict, bool]:
     if settings.akshare_mock:
-        return _mock_capital_flow()
+        return _mock_capital_flow(), True
     return _fetch_capital_flow_live(stock_code)
 
 
-def fetch_sentiment(stock_code: str) -> dict:
+def fetch_sentiment(stock_code: str) -> tuple[dict, bool]:
     if settings.akshare_mock:
-        return _mock_sentiment()
+        return _mock_sentiment(), True
     return _fetch_sentiment_live(stock_code)
 
 
 async def build_detail(stock_code: str, days: int = 90) -> dict:
-    """Build full 5-dimension detail for a watched stock."""
+    # Build full 5-dimension detail for a watched stock. Each section carries a
+    # source flag so the UI can label mock data honestly — never present
+    # fabricated prices/financials as authoritative.
     log.info("build_detail: %s days=%d", stock_code, days)
 
     loop = asyncio.get_event_loop()
@@ -452,11 +461,26 @@ async def build_detail(stock_code: str, days: int = 90) -> dict:
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    industry_rank = results[0] if isinstance(results[0], dict) else _mock_industry_rank()
-    disclosed_info = results[1] if isinstance(results[1], dict) else _mock_disclosed_info()
-    price_history = results[2] if isinstance(results[2], dict) else _mock_price_history(days)
-    capital_flow = results[3] if isinstance(results[3], dict) else _mock_capital_flow()
-    sentiment = results[4] if isinstance(results[4], dict) else _mock_sentiment()
+    def _pick(idx: int, fallback: dict) -> tuple[dict, bool]:
+        r = results[idx]
+        if isinstance(r, tuple) and len(r) == 2 and isinstance(r[0], dict):
+            return r[0], bool(r[1])
+        return fallback, True
+
+    industry_rank, ir_mock = _pick(0, _mock_industry_rank())
+    disclosed_info, di_mock = _pick(1, _mock_disclosed_info())
+    price_history, ph_mock = _pick(2, _mock_price_history(days))
+    capital_flow, cf_mock = _pick(3, _mock_capital_flow())
+    sentiment, sm_mock = _pick(4, _mock_sentiment())
+
+    sources = {
+        "industry_rank": "mock" if ir_mock else "real",
+        "disclosed_info": "mock" if di_mock else "real",
+        "price_history": "mock" if ph_mock else "real",
+        "capital_flow": "mock" if cf_mock else "real",
+        "sentiment": "mock" if sm_mock else "real",
+    }
+    any_mock = any(v == "mock" for v in sources.values())
 
     current_price = price_history["summary"]["end_price"]
     start_price = price_history["summary"]["start_price"]
@@ -471,4 +495,7 @@ async def build_detail(stock_code: str, days: int = 90) -> dict:
         "sentiment": sentiment,
         "current_price": current_price,
         "change_pct": change_pct,
+        "sources": sources,
+        "source": "mock" if any_mock else "real",
+        "ok": not any_mock,
     }

@@ -20,27 +20,38 @@ async def websocket_alerts(websocket: WebSocket):
     log.info("ws connected, total=%d", len(ACTIVE_CONNECTIONS))
     try:
         while True:
-            data = await websocket.receive_text()
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+            except asyncio.TimeoutError:
+                # No client message in 30s; probe liveness. A dead/half-open
+                # socket raises here and is cleaned up in finally.
+                await websocket.send_text("ping")
+                continue
             if data == "ping":
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
         pass
+    except Exception as exc:
+        log.warning("ws error: %s", exc)
     finally:
         ACTIVE_CONNECTIONS.discard(websocket)
         log.info("ws disconnected, total=%d", len(ACTIVE_CONNECTIONS))
 
 
 async def broadcast_alert(msg: dict) -> None:
-    if not ACTIVE_CONNECTIONS:
+    conns = list(ACTIVE_CONNECTIONS)
+    if not conns:
         return
     import json as _json
     payload = _json.dumps(msg)
     dead: list[WebSocket] = []
-    for ws in ACTIVE_CONNECTIONS:
+    sent = 0
+    for ws in conns:
         try:
             await ws.send_text(payload)
+            sent += 1
         except Exception:
             dead.append(ws)
     for ws in dead:
         ACTIVE_CONNECTIONS.discard(ws)
-    log.info("broadcast to %d ws clients", len(ACTIVE_CONNECTIONS) - len(dead))
+    log.info("broadcast to %d ws clients (%d dead removed)", sent, len(dead))

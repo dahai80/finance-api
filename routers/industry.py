@@ -67,47 +67,47 @@ async def add_industry_event(event: IndustryEventCreate) -> dict[str, Any]:
 
 
 @router.get("/top-stocks")
-async def get_industry_top_stocks(limit: int = 20) -> list[dict[str, Any]]:
-    """Get top performing stocks by industry with multi-source fallback."""
+async def get_industry_top_stocks(limit: int = 20) -> dict[str, Any]:
+    # Top performing stocks by industry with multi-source fallback. Mock
+    # fallback is flagged so the UI never presents fabricated stocks as real.
     log.info("GET /api/industry/top-stocks limit=%d", limit)
     limit = _validate_limit(limit)
     try:
-        return await multi_source_fetcher.afetch_industry_top_stocks(limit)
+        items = await multi_source_fetcher.afetch_industry_top_stocks(limit)
+        return {"data": items, "source": "real", "ok": True}
     except Exception as exc:
         log.exception("top_stocks failed")
-        return _mock_industry_top_stocks(limit)
+        return {"data": _mock_industry_top_stocks(limit), "source": "mock", "ok": False}
 
 
 @router.get("/news")
 async def get_industry_news(
     limit: int = 20,
     industry: Optional[str] = None,
-) -> list[dict[str, Any]]:
-    """Get latest industry dynamics/news.
-
-    No-industry (latest stream): served from the grouped cache — flatten all
-    industries and sort by pub_time desc. Sub-10ms, no live 5s fetch.
-    With-industry: live fetch for the requested industry only.
-    """
+) -> dict[str, Any]:
+    # Latest industry dynamics/news. No-industry: served from grouped cache
+    # (flatten + sort by pub_time desc, sub-10ms). With-industry: live fetch.
+    # Mock fallback is flagged via source="mock".
     log.info("GET /api/industry/news limit=%d industry=%s", limit, industry)
     limit = _validate_limit(limit)
     try:
         if industry:
-            return await multi_source_fetcher.afetch_industry_news(limit, industry=industry)
+            items = await multi_source_fetcher.afetch_industry_news(limit, industry=industry)
+            return {"data": items, "source": "real", "ok": True}
         # Flatten grouped cache into a latest-news stream
         cached = multi_source_fetcher.get_cached_industry_news_grouped()
         if not cached["data"]:
             asyncio.create_task(multi_source_fetcher.afetch_all_industry_news_grouped())
-            return []
+            return {"data": [], "source": "real", "ok": True}
         flat: list[dict[str, Any]] = []
         for group in cached["data"]:
             for item in group.get("items", []):
                 flat.append(item)
         flat.sort(key=lambda x: x.get("pub_time", "") or "", reverse=True)
-        return flat[:limit]
+        return {"data": flat[:limit], "source": "real", "ok": True}
     except Exception as exc:
         log.exception("industry_news failed")
-        return _mock_industry_news(limit)
+        return {"data": _mock_industry_news(limit), "source": "mock", "ok": False}
 
 
 @router.get("/news/grouped")

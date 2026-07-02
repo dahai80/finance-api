@@ -21,7 +21,22 @@ class PredictRequest(BaseModel):
 
 @router.get("/health")
 async def kronos_health() -> dict[str, Any]:
-    return {"status": "ok", "service": "kronos"}
+    # Real check: is the Kronos model importable? Report degraded (not ok)
+    # when the model is absent so monitoring reflects reality.
+    model_available = False
+    try:
+        model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model")
+        if model_dir not in sys.path:
+            sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+        from model.kronos import KronosPredictor  # noqa: F401
+        model_available = True
+    except Exception as exc:
+        log.warning("kronos health: model not available: %s", exc)
+    return {
+        "status": "ok" if model_available else "degraded",
+        "service": "kronos",
+        "model_available": model_available,
+    }
 
 
 @router.post("/predict")

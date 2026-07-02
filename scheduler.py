@@ -20,13 +20,6 @@ FINANCE_API = "http://localhost:8000"
 scheduler = AsyncIOScheduler()
 
 
-def _log_result(task_name: str, exc: Exception | None) -> None:
-    if exc:
-        log.error("task %s failed: %s", task_name, exc)
-    else:
-        log.info("task %s completed")
-
-
 # ── Task definitions ──────────────────────────────────────────────
 
 async def _job_ipo_sync() -> None:

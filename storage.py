@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json as _json_mod
 from datetime import date
 from typing import Any
@@ -13,19 +14,30 @@ log = get_logger("finance.storage")
 
 _pool: asyncpg.Pool | None = None
 _redis: aioredis.Redis | None = None
+_init_lock = asyncio.Lock()
 
 
 async def get_pg() -> asyncpg.Pool:
     global _pool
-    if _pool is None:
+    if _pool is not None:
+        return _pool
+    async with _init_lock:
+        if _pool is not None:
+            return _pool
         log.info("opening asyncpg pool dsn=%s", settings.pg_dsn.split("@")[-1])
-        _pool = await asyncpg.create_pool(dsn=settings.pg_dsn, min_size=1, max_size=5)
+        _pool = await asyncpg.create_pool(
+            dsn=settings.pg_dsn, min_size=1, max_size=5, command_timeout=30
+        )
     return _pool
 
 
 async def get_redis() -> aioredis.Redis:
     global _redis
-    if _redis is None:
+    if _redis is not None:
+        return _redis
+    async with _init_lock:
+        if _redis is not None:
+            return _redis
         log.info("opening redis url=%s", settings.redis_url)
         _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
     return _redis
@@ -518,8 +530,7 @@ async def update_workflow_config(
     if not sets:
         return
 
-    sets.append(f"updated_at = ${len(params) + 1}")
-    params.append(None)  # will be set by DEFAULT in SQL, but we need a param slot
+    sets.append("updated_at = now()")
 
     await pg.execute(
         f"""
