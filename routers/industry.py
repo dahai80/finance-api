@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 from typing import Any, Optional
 
@@ -9,6 +8,7 @@ from pydantic import BaseModel
 
 from config import get_logger, settings
 from data_provider import multi_source_fetcher
+from async_utils import spawn_background_task
 import storage
 
 router = APIRouter(prefix="/api/industry", tags=["industry"])
@@ -76,11 +76,11 @@ async def get_industry_top_stocks(limit: int = 20) -> dict[str, Any]:
     limit = _validate_limit(limit)
     cached = multi_source_fetcher.get_cached_industry_top_stocks()
     if not cached["data"] or cached["stale"]:
-        asyncio.create_task(multi_source_fetcher.afetch_all_industry_top_stocks(10))
+        spawn_background_task(multi_source_fetcher.afetch_all_industry_top_stocks(10), "industry_top_stocks")
     if cached["data"]:
         data = [{**g, "stocks": g.get("stocks", [])[:limit]} for g in cached["data"]]
         return {"data": data, "source": "real", "ok": True}
-    return {"data": _mock_industry_top_stocks(limit), "source": "mock", "ok": False}
+    return {"data": multi_source_fetcher._mock_industry_top_stocks(limit), "source": "mock", "ok": False}
 
 
 @router.get("/news")
@@ -100,7 +100,7 @@ async def get_industry_news(
         # Flatten grouped cache into a latest-news stream
         cached = multi_source_fetcher.get_cached_industry_news_grouped()
         if not cached["data"]:
-            asyncio.create_task(multi_source_fetcher.afetch_all_industry_news_grouped())
+            spawn_background_task(multi_source_fetcher.afetch_all_industry_news_grouped(), "industry_news")
             return {"data": [], "source": "real", "ok": True}
         flat: list[dict[str, Any]] = []
         for group in cached["data"]:
@@ -123,7 +123,7 @@ async def get_industry_news_grouped() -> dict[str, Any]:
     """
     cached = multi_source_fetcher.get_cached_industry_news_grouped()
     if not cached["data"] or cached["stale"]:
-        asyncio.create_task(multi_source_fetcher.afetch_all_industry_news_grouped())
+        spawn_background_task(multi_source_fetcher.afetch_all_industry_news_grouped(), "industry_news_grouped")
     log.info(
         "GET /api/industry/news/grouped cached=%d stale=%s",
         len(cached["data"]), cached["stale"],
@@ -144,23 +144,6 @@ async def trigger_industry_top_stocks() -> dict[str, Any]:
 
 
 # ── Mock Data ───────────────────────────────────────────────────────────
-
-def _mock_industry_top_stocks(limit: int) -> list[dict[str, Any]]:
-    stocks = [
-        ("600519", "贵州茅台", "白酒"), ("000858", "五粮液", "白酒"),
-        ("601318", "中国平安", "保险"), ("600036", "招商银行", "银行"),
-        ("300750", "宁德时代", "电池"), ("601012", "隆基绿能", "光伏"),
-        ("000333", "美的集团", "家电"), ("600276", "恒瑞医药", "医药"),
-        ("002415", "海康威视", "电子"), ("000001", "平安银行", "银行"),
-    ]
-    import random
-    return [{
-        "code": s[0], "name": s[1], "industry": s[2],
-        "change_pct": round(random.uniform(-5, 8), 2),
-        "main_net": round(random.uniform(-50, 200), 2),
-        "main_net_rate": round(random.uniform(-3, 10), 2),
-    } for s in stocks[:limit]]
-
 
 def _mock_industry_news(limit: int) -> list[dict[str, Any]]:
     news = [

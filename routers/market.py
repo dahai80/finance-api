@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import date
 from typing import Any
 
@@ -10,6 +9,7 @@ from pydantic import BaseModel
 from config import get_logger, settings
 from data_provider import kronos_client
 from data_provider import multi_source_fetcher
+from async_utils import spawn_background_task
 import storage
 
 router = APIRouter(prefix="/api/market", tags=["market"])
@@ -65,7 +65,7 @@ async def get_individual_money_flow(limit: int = 20) -> dict[str, Any]:
     try:
         cached = multi_source_fetcher.get_cached_individual_money_flow(limit)
         if not cached["data"] or cached["stale"]:
-            asyncio.create_task(multi_source_fetcher.arefresh_individual_money_flow_cache(20))
+            spawn_background_task(multi_source_fetcher.arefresh_individual_money_flow_cache(20), "individual_money_flow")
         if cached["data"]:
             source = "mock" if cached["is_mock"] else "real"
             return {"data": cached["data"], "source": source, "ok": True}

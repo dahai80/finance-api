@@ -5,6 +5,7 @@ from datetime import date
 from typing import Any
 
 from config import get_logger
+from async_utils import call_with_timeout
 
 log = get_logger("finance.akshare")
 
@@ -72,7 +73,7 @@ def fetch_upcoming_ipo_live() -> list[dict[str, Any]]:
     try:
         import akshare as ak  # type: ignore
         log.info("fetch_upcoming_ipo_live: calling ak.stock_xgsglb_em()")
-        df = ak.stock_xgsglb_em()
+        df = call_with_timeout(ak.stock_xgsglb_em, 15.0)
         if df is None or df.empty:
             log.warning("fetch_upcoming_ipo_live: empty dataframe")
             return []

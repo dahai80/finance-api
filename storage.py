@@ -45,12 +45,19 @@ async def get_redis() -> aioredis.Redis:
 
 async def close() -> None:
     global _pool, _redis
-    if _pool is not None:
-        await _pool.close()
-        _pool = None
-    if _redis is not None:
-        await _redis.aclose()
-        _redis = None
+    async with _init_lock:
+        if _pool is not None:
+            try:
+                await _pool.close()
+            except Exception:
+                log.exception("asyncpg pool close failed")
+            _pool = None
+        if _redis is not None:
+            try:
+                await _redis.aclose()
+            except Exception:
+                log.exception("redis close failed")
+            _redis = None
 
 
 async def list_ipo(
@@ -141,27 +148,28 @@ async def upsert_ipo(items: list[dict[str, Any]]) -> int:
     pg = await get_pg()
     upserted = 0
     async with pg.acquire() as conn:
-        for item in items:
-            code = item.get("stock_code")
-            if not code:
-                log.warning("skip ipo item missing stock_code: %s", item)
-                continue
-            await conn.execute(
-                """
-                INSERT INTO finance_control.fc_ipo_factory
-                    (stock_code, stock_name, ipo_date, fundamental_metrics, status)
-                VALUES ($1, $2, $3, $4, 'PENDING')
-                ON CONFLICT (stock_code) DO UPDATE SET
-                    stock_name = EXCLUDED.stock_name,
-                    ipo_date = EXCLUDED.ipo_date,
-                    fundamental_metrics = EXCLUDED.fundamental_metrics
-                """,
-                code,
-                item.get("stock_name", ""),
-                item.get("ipo_date") or date.today(),
-                _json_mod.dumps(item.get("fundamental_metrics") or {}),
-            )
-            upserted += 1
+        async with conn.transaction():
+            for item in items:
+                code = item.get("stock_code")
+                if not code:
+                    log.warning("skip ipo item missing stock_code: %s", item)
+                    continue
+                await conn.execute(
+                    """
+                    INSERT INTO finance_control.fc_ipo_factory
+                        (stock_code, stock_name, ipo_date, fundamental_metrics, status)
+                    VALUES ($1, $2, $3, $4, 'PENDING')
+                    ON CONFLICT (stock_code) DO UPDATE SET
+                        stock_name = EXCLUDED.stock_name,
+                        ipo_date = EXCLUDED.ipo_date,
+                        fundamental_metrics = EXCLUDED.fundamental_metrics
+                    """,
+                    code,
+                    item.get("stock_name", ""),
+                    item.get("ipo_date") or date.today(),
+                    _json_mod.dumps(item.get("fundamental_metrics") or {}),
+                )
+                upserted += 1
     log.info("upserted %d ipo rows", upserted)
     return upserted
 

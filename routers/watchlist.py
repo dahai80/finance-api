@@ -122,10 +122,17 @@ async def _overlay_live_price(detail: dict[str, Any], stock_code: str) -> dict[s
         q = quotes.get(stock_code)
         if q and q.get("price") is not None:
             live_price = float(q["price"])
+            if live_price <= 0:
+                log.warning("watchlist overlay non-positive live price for %s: %s", stock_code, live_price)
+                return detail
             detail["current_price"] = live_price
+            detail["price_live"] = True
             start_price = detail.get("price_history", {}).get("summary", {}).get("start_price")
-            if start_price:
+            if start_price and start_price > 0:
                 detail["change_pct"] = round((live_price - start_price) / start_price * 100, 2)
+            else:
+                log.warning("watchlist overlay invalid start_price for %s: %s", stock_code, start_price)
+                detail["change_pct"] = 0.0
     except Exception as exc:
         log.warning("watchlist detail live price overlay failed for %s: %s", stock_code, exc)
     return detail

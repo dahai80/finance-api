@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date
 from typing import Any
 
 from config import get_logger
+from async_utils import call_with_timeout
 import storage
 
 log = get_logger("finance.industry_map")
@@ -41,7 +43,10 @@ async def _fetch_industry_flow() -> list[dict[str, Any]]:
     """Fetch industry fund flow from akshare."""
     try:
         import akshare as ak  # type: ignore
-        df = ak.stock_fund_flow_industry()
+        loop = asyncio.get_event_loop()
+        df = await loop.run_in_executor(
+            None, call_with_timeout, ak.stock_fund_flow_industry, 10.0
+        )
         if df is None or df.empty:
             return []
 

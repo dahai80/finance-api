@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from config import get_logger, settings
+from async_utils import call_with_timeout
 
 log = get_logger("finance.watchlist_fetcher")
 
@@ -132,7 +133,7 @@ def _search_stock_live(q: str) -> list[dict]:
     """Search A-share stocks by code or name using AkShare."""
     try:
         import akshare as ak
-        df = ak.stock_info_a_code_name()
+        df = call_with_timeout(ak.stock_info_a_code_name, 8.0)
         if df is None or df.empty:
             return []
 
@@ -162,34 +163,52 @@ def _search_stock_live(q: str) -> list[dict]:
 
 
 def _fetch_industry_rank_live(stock_code: str) -> tuple[dict, bool]:
-    # Returns (data, is_mock). is_mock=True signals fabricated fallback data.
+    # Returns (data, is_mock). Ranks the stock's OWN industry by today's fund
+    # flow. Needs the stock's industry (stock_individual_info_em) AND the
+    # industry flow table; if either is missing we fall back to mock rather
+    # than fabricate a rank or hardcode a pe_vs_industry ratio.
     try:
         import akshare as ak
-        df = ak.stock_fund_flow_industry()
+
+        industry_name: str | None = None
+        try:
+            info = call_with_timeout(ak.stock_individual_info_em, 8.0, symbol=stock_code)
+            if info is not None and not info.empty and "item" in info.columns:
+                row = info[info["item"] == "行业"]
+                if not row.empty:
+                    industry_name = str(row.iloc[0].get("value", "")).strip() or None
+        except Exception:
+            log.debug("industry lookup failed for %s", stock_code, exc_info=True)
+
+        df = call_with_timeout(ak.stock_fund_flow_industry, 8.0)
         if df is None or df.empty:
-            log.warning("industry rank empty for %s, returning mock", stock_code)
+            log.warning("industry flow empty for %s, returning mock", stock_code)
             return _mock_industry_rank(), True
 
-        industry_name = "未知"
-        rank = 0
-        total = 0
-        for i, row in df.iterrows():
-            sector = str(row.get("行业名称", row.get("industry", "")))
-            inflow = 0
-            try:
-                inflow = float(str(row.get("实际流入资金", row.get("net_inflow", 0))).replace(",", ""))
-            except Exception:
-                pass
-            if sector:
-                industry_name = sector
-                rank = i + 1
-                total = len(df)
+        col_sector = "行业" if "行业" in df.columns else ("行业名称" if "行业名称" in df.columns else None)
+        col_flow = "净额" if "净额" in df.columns else ("实际流入资金" if "实际流入资金" in df.columns else None)
+        if not col_sector or not col_flow:
+            log.warning("industry flow columns unexpected for %s: %s", stock_code, list(df.columns))
+            return _mock_industry_rank(), True
 
+        ranked = df.sort_values(col_flow, ascending=False).reset_index(drop=True)
+        total = len(ranked)
+
+        if not industry_name:
+            log.warning("industry unknown for %s, returning mock", stock_code)
+            return _mock_industry_rank(), True
+
+        match = ranked[ranked[col_sector] == industry_name]
+        if match.empty:
+            log.warning("industry %s not in flow table for %s, returning mock", industry_name, stock_code)
+            return _mock_industry_rank(), True
+
+        rank = int(match.index[0]) + 1
         return {
             "rank": rank,
             "total_in_industry": total,
             "industry_name": industry_name,
-            "pe_vs_industry": 0.85,
+            "pe_vs_industry": None,
         }, False
     except Exception:
         log.exception("fetch_industry_rank_live failed for %s", stock_code)
@@ -197,13 +216,15 @@ def _fetch_industry_rank_live(stock_code: str) -> tuple[dict, bool]:
 
 
 def _fetch_disclosed_info_live(stock_code: str) -> tuple[dict, bool]:
-    # Returns (data, is_mock). Financials are always mock (no live source) —
-    # flagged so the UI never presents them as authoritative.
+    # Returns (data, is_mock). Financials have no live source and are always
+    # fabricated — flagged is_mock=True so the UI never presents them as
+    # authoritative. Announcements come from akshare when available; we never
+    # fabricate announcement text.
     try:
         import akshare as ak
-        announcements = []
+        announcements: list[dict] = []
         try:
-            df = ak.stock_notice_report_em(symbol=stock_code)
+            df = call_with_timeout(ak.stock_notice_report_em, 8.0, symbol=stock_code)
             if df is not None and not df.empty:
                 for _, row in df.head(5).iterrows():
                     announcements.append({
@@ -212,24 +233,13 @@ def _fetch_disclosed_info_live(stock_code: str) -> tuple[dict, bool]:
                         "type": str(row.get("公告类型", "公告")),
                     })
         except Exception:
-            pass
-
-        if not announcements:
-            announcements = [
-                {"date": "2026-06-25", "title": f"{stock_code} 最新公告", "type": "公告"},
-            ]
+            log.debug("notice fetch failed for %s", stock_code, exc_info=True)
 
         return {
-            "financials": {
-                "roe": 25.0,
-                "revenue_yoy": 12.0,
-                "net_profit_yoy": 15.0,
-                "gross_margin": 85.0,
-                "debt_ratio": 0.15,
-            },
+            "financials": _mock_disclosed_info()["financials"],
             "announcements": announcements,
             "next_report_date": None,
-        }, False
+        }, True
     except Exception:
         log.exception("fetch_disclosed_info_live failed for %s", stock_code)
         return _mock_disclosed_info(), True
@@ -243,7 +253,9 @@ def _fetch_price_history_live(stock_code: str, days: int = 90) -> tuple[dict, bo
         end_date = date.today().isoformat()
         start_date = (date.today() - timedelta(days=days)).isoformat()
 
-        df = ak.stock_zh_a_hist(
+        df = call_with_timeout(
+            ak.stock_zh_a_hist,
+            8.0,
             symbol=stock_code,
             period="daily",
             start_date=start_date,
@@ -255,12 +267,16 @@ def _fetch_price_history_live(stock_code: str, days: int = 90) -> tuple[dict, bo
 
         kline: list[dict] = []
         for _, row in df.iterrows():
+            close = float(row.get("收盘", 0))
+            if close <= 0:
+                log.debug("skip zero/invalid close row for %s", stock_code)
+                continue
             kline.append({
                 "date": str(row.get("日期", ""))[:10],
                 "open": float(row.get("开盘", 0)),
                 "high": float(row.get("最高", 0)),
                 "low": float(row.get("最低", 0)),
-                "close": float(row.get("收盘", 0)),
+                "close": close,
                 "volume": float(row.get("成交量", 0)),
             })
 
@@ -296,7 +312,7 @@ def _fetch_capital_flow_live(stock_code: str) -> tuple[dict, bool]:
     # Returns (data, is_mock).
     try:
         import akshare as ak
-        df = ak.stock_individual_fund_flow(stock=stock_code)
+        df = call_with_timeout(ak.stock_individual_fund_flow, 8.0, stock=stock_code)
         if df is None or df.empty:
             log.warning("capital flow empty for %s, returning mock", stock_code)
             return _mock_capital_flow(), True
@@ -306,17 +322,17 @@ def _fetch_capital_flow_live(stock_code: str) -> tuple[dict, bool]:
             return _mock_capital_flow(), True
 
         today = {
-            "main_net_inflow": float(last.get("主力净流入", 0) or 0),
-            "large_order_net": float(last.get("大单净流入", 0) or 0),
-            "medium_order_net": float(last.get("中单净流入", 0) or 0),
-            "small_order_net": float(last.get("小单净流入", 0) or 0),
+            "main_net_inflow": float(last.get("主力净流入-净额", last.get("主力净流入", 0)) or 0),
+            "large_order_net": float(last.get("大单净流入-净额", last.get("大单净流入", 0)) or 0),
+            "medium_order_net": float(last.get("中单净流入-净额", last.get("中单净流入", 0)) or 0),
+            "small_order_net": float(last.get("小单净流入-净额", last.get("小单净流入", 0)) or 0),
         }
 
         recent_5 = []
         for _, row in df.tail(5).iterrows():
             recent_5.append({
                 "date": str(row.get("日期", ""))[:10],
-                "main_net_inflow": float(row.get("主力净流入", 0) or 0),
+                "main_net_inflow": float(row.get("主力净流入-净额", row.get("主力净流入", 0)) or 0),
             })
 
         return {"today": today, "recent_5_days": recent_5}, False
@@ -329,7 +345,7 @@ def _fetch_sentiment_live(stock_code: str) -> tuple[dict, bool]:
     # Returns (data, is_mock).
     try:
         import akshare as ak
-        df = ak.stock_news_em(symbol=stock_code)
+        df = call_with_timeout(ak.stock_news_em, 8.0, symbol=stock_code)
         if df is None or df.empty:
             log.warning("sentiment news empty for %s, returning mock", stock_code)
             return _mock_sentiment(), True
@@ -451,12 +467,23 @@ async def build_detail(stock_code: str, days: int = 90) -> dict:
     log.info("build_detail: %s days=%d", stock_code, days)
 
     loop = asyncio.get_event_loop()
+
+    async def _t(coro, label: str):
+        # Per-section timeout: a hung akshare call (run in a daemon thread)
+        # must not stall the whole detail. On timeout we abandon the section
+        # and _pick falls back to mock.
+        try:
+            return await asyncio.wait_for(coro, timeout=15.0)
+        except asyncio.TimeoutError:
+            log.warning("build_detail section %s timed out (15s) for %s", label, stock_code)
+            return None
+
     tasks = [
-        loop.run_in_executor(None, fetch_industry_rank, stock_code),
-        loop.run_in_executor(None, fetch_disclosed_info, stock_code),
-        loop.run_in_executor(None, fetch_price_history, stock_code, days),
-        loop.run_in_executor(None, fetch_capital_flow, stock_code),
-        loop.run_in_executor(None, fetch_sentiment, stock_code),
+        _t(loop.run_in_executor(None, fetch_industry_rank, stock_code), "industry_rank"),
+        _t(loop.run_in_executor(None, fetch_disclosed_info, stock_code), "disclosed_info"),
+        _t(loop.run_in_executor(None, fetch_price_history, stock_code, days), "price_history"),
+        _t(loop.run_in_executor(None, fetch_capital_flow, stock_code), "capital_flow"),
+        _t(loop.run_in_executor(None, fetch_sentiment, stock_code), "sentiment"),
     ]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -486,12 +513,18 @@ async def build_detail(stock_code: str, days: int = 90) -> dict:
     # close = previous trading day, stale intraday). Sina quotes are accurate
     # to the cent; a trading system must never show a stale price as current.
     live_price = None
+    price_live = False
     try:
         from data_provider import multi_source_fetcher
-        quotes = await multi_source_fetcher.afetch_realtime_quotes([stock_code])
+        quotes = await asyncio.wait_for(
+            multi_source_fetcher.afetch_realtime_quotes([stock_code]), timeout=10.0
+        )
         q = quotes.get(stock_code)
         if q and q.get("price") is not None:
             live_price = float(q["price"])
+            price_live = True
+    except asyncio.TimeoutError:
+        log.warning("build_detail live quote timed out (10s) for %s", stock_code)
     except Exception as exc:
         log.warning("build_detail live quote failed for %s: %s", stock_code, exc)
 
@@ -500,6 +533,8 @@ async def build_detail(stock_code: str, days: int = 90) -> dict:
     start_price = price_history["summary"]["start_price"]
     change_pct = round((current_price - start_price) / start_price * 100, 2) if start_price else 0
 
+    # ok requires a live intraday price — a stale close shown as "current" is
+    # not trustworthy for a trading system, even if every section is real.
     return {
         "stock_code": stock_code,
         "industry_rank": industry_rank,
@@ -509,7 +544,8 @@ async def build_detail(stock_code: str, days: int = 90) -> dict:
         "sentiment": sentiment,
         "current_price": current_price,
         "change_pct": change_pct,
+        "price_live": price_live,
         "sources": sources,
         "source": "mock" if any_mock else "real",
-        "ok": not any_mock,
+        "ok": (not any_mock) and price_live,
     }

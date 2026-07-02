@@ -8,6 +8,7 @@ from config import get_logger, settings
 from data_provider import akshare_fetcher
 from data_provider.ipo_scorer import score_ipo
 from data_provider.industry_map import get_industry_heat
+from async_utils import call_with_timeout
 import storage
 
 router = APIRouter(prefix="/api/ipo", tags=["ipo"])
@@ -22,6 +23,16 @@ async def list_ipo(
     min_score: int | None = None,
     search: str | None = None,
 ) -> dict:
+    # Bound inputs to protect the DB from unbounded result sets / negative
+    # offsets. Search is capped so a huge pattern can't blow up ILIKE.
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    if min_score is not None:
+        min_score = max(0, min(int(min_score), 100))
+    if search is not None:
+        search = search.strip()[:64] or None
+    if status is not None:
+        status = status.strip()[:32] or None
     log.info("GET /api/ipo limit=%d offset=%d status=%s search=%s", limit, offset, status, search)
     rows = await storage.list_ipo(limit=limit, offset=offset, status=status, min_score=min_score, search=search)
     total = await storage.count_ipo(status=status, min_score=min_score, search=search)
@@ -32,19 +43,25 @@ async def list_ipo(
 async def sync_ipo() -> dict:
     log.info("POST /api/ipo/sync mock=%s", settings.akshare_mock)
     try:
+        loop = asyncio.get_event_loop()
         if settings.akshare_mock:
             rows = akshare_fetcher.fetch_upcoming_ipo_mock()
         else:
-            rows = akshare_fetcher.fetch_upcoming_ipo_live()
+            rows = await loop.run_in_executor(
+                None, call_with_timeout, akshare_fetcher.fetch_upcoming_ipo_live, 20.0
+            )
         upserted = await storage.upsert_ipo(rows)
 
         scored = 0
         for row in rows:
-            result = await _score_with_industry_heat(row)
-            await storage.update_ipo_score(
-                row["stock_code"], result["total"], result["recommendation"]
-            )
-            scored += 1
+            try:
+                result = await _score_with_industry_heat(row)
+                await storage.update_ipo_score(
+                    row["stock_code"], result["total"], result["recommendation"]
+                )
+                scored += 1
+            except Exception:
+                log.exception("ipo sync: score failed for %s", row.get("stock_code"))
 
         return {
             "synced": len(rows),
@@ -52,9 +69,9 @@ async def sync_ipo() -> dict:
             "scored": scored,
             "mock": settings.akshare_mock,
         }
-    except Exception as exc:
+    except Exception:
         log.exception("ipo sync failed")
-        raise HTTPException(status_code=500, detail=f"sync failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="ipo sync failed") from None
 
 
 async def _score_with_industry_heat(row: dict) -> dict:

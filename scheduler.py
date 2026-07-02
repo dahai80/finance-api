@@ -11,6 +11,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from config import get_logger
 from data_provider import akshare_fetcher
 from data_provider import multi_source_fetcher
+from async_utils import call_with_timeout
 import storage
 
 log = get_logger("finance.scheduler")
@@ -26,17 +27,26 @@ async def _job_ipo_sync() -> None:
     """08:00 每日新股同步 + 评分"""
     log.info("scheduled job: ipo_sync")
     try:
-        rows = akshare_fetcher.fetch_upcoming_ipo_live()
+        loop = asyncio.get_event_loop()
+        rows = await loop.run_in_executor(
+            None, call_with_timeout, akshare_fetcher.fetch_upcoming_ipo_live, 20.0
+        )
+        if not rows:
+            log.warning("ipo_sync: no rows fetched, skip")
+            return
         from data_provider.ipo_scorer import score_ipo
 
         upserted = await storage.upsert_ipo(rows)
         scored = 0
         for row in rows:
-            result = score_ipo(row)
-            await storage.update_ipo_score(
-                row["stock_code"], result["total"], result["recommendation"]
-            )
-            scored += 1
+            try:
+                result = score_ipo(row)
+                await storage.update_ipo_score(
+                    row["stock_code"], result["total"], result["recommendation"]
+                )
+                scored += 1
+            except Exception:
+                log.exception("ipo_sync: score failed for %s", row.get("stock_code"))
         log.info("ipo_sync: upserted=%d scored=%d", upserted, scored)
     except Exception as exc:
         log.exception("ipo_sync failed")
@@ -168,29 +178,34 @@ async def _job_individual_money_flow() -> None:
 # ── Schedule registration ─────────────────────────────────────────
 
 def init_scheduler() -> AsyncIOScheduler:
-    scheduler.add_job(_job_ipo_sync, CronTrigger(day_of_week="mon-fri", hour=8, minute=0), id="ipo_sync")
-    scheduler.add_job(_job_premarket_sentiment, CronTrigger(day_of_week="mon-fri", hour=8, minute=30), id="premarket_sentiment")
+    common = {"replace_existing": True, "misfire_grace_time": 300, "coalesce": True}
+    scheduler.add_job(_job_ipo_sync, CronTrigger(day_of_week="mon-fri", hour=8, minute=0), id="ipo_sync", **common)
+    scheduler.add_job(_job_premarket_sentiment, CronTrigger(day_of_week="mon-fri", hour=8, minute=30), id="premarket_sentiment", **common)
     scheduler.add_job(
         _job_money_flow,
         CronTrigger(day_of_week="mon-fri", hour="9-14", minute="*/5"),
         id="money_flow",
+        **common,
     )
     scheduler.add_job(
         _job_industry_news,
         CronTrigger(day_of_week="mon-fri", hour="8-15", minute="*/10"),
         id="industry_news",
+        **common,
     )
     scheduler.add_job(
         _job_industry_top_stocks,
         CronTrigger(day_of_week="mon-fri", hour="8-15", minute="*/10"),
         id="industry_top_stocks",
+        **common,
     )
     scheduler.add_job(
         _job_individual_money_flow,
         CronTrigger(day_of_week="mon-fri", hour="9-14", minute="*/5"),
         id="individual_money_flow",
+        **common,
     )
-    scheduler.add_job(_job_daily_content, CronTrigger(day_of_week="mon-fri", hour=15, minute=15), id="daily_content")
-    scheduler.add_job(_job_watchlist_refresh, CronTrigger(day_of_week="mon-fri", hour=15, minute=30), id="watchlist_refresh")
+    scheduler.add_job(_job_daily_content, CronTrigger(day_of_week="mon-fri", hour=15, minute=15), id="daily_content", **common)
+    scheduler.add_job(_job_watchlist_refresh, CronTrigger(day_of_week="mon-fri", hour=15, minute=30), id="watchlist_refresh", **common)
     log.info("scheduler: 8 jobs registered (ipo_sync, premarket_sentiment, money_flow, industry_news, industry_top_stocks, individual_money_flow, daily_content, watchlist_refresh)")
     return scheduler

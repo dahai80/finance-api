@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from async_utils import call_with_timeout as _call_with_timeout
 from config import get_logger, settings
 
 log = get_logger("finance.multi_source")
@@ -74,31 +75,6 @@ def _random_delay(min_s: float = 0.5, max_s: float = 2.0) -> None:
     time.sleep(random.uniform(min_s, max_s))
 
 
-def _call_with_timeout(func, timeout: float, *args, **kwargs):
-    # Run a blocking call in a daemon thread with a hard timeout. signal.alarm
-    # only works in the main thread; this runs from any thread (incl. executor
-    # workers). On timeout the daemon worker is abandoned — it cannot block
-    # interpreter shutdown.
-    q: "queue.Queue" = queue.Queue()
-
-    def _worker():
-        try:
-            q.put(("ok", func(*args, **kwargs)))
-        except Exception as exc:
-            q.put(("err", exc))
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    try:
-        kind, val = q.get(timeout=timeout)
-    except queue.Empty:
-        log.warning("call timed out after %.1fs, abandoned worker", timeout)
-        return None
-    if kind == "err":
-        raise val
-    return val
-
-
 # ── Money Flow Fetchers ───────────────────────────────────────────────
 
 def _fetch_money_flow_akshare() -> list[dict[str, Any]]:
@@ -110,7 +86,7 @@ def _fetch_money_flow_akshare() -> list[dict[str, Any]]:
     try:
         import akshare as ak
         _random_delay()
-        df = ak.stock_fund_flow_industry()
+        df = _call_with_timeout(ak.stock_fund_flow_industry, 8.0)
         if df is None or df.empty:
             _breaker.record_failure("akshare_money_flow")
             return []
@@ -227,7 +203,7 @@ def _fetch_sentiment_akshare() -> dict[str, Any]:
 
         # SPY
         try:
-            df = ak.stock_us_index_daily(symbol="SPY")
+            df = _call_with_timeout(ak.stock_us_index_daily, 8.0, symbol="SPY")
             if df is not None and not df.empty:
                 last = df.iloc[-1]
                 us_markets["spy_close"] = _to_float(last.get("收盘", last.get("close", 0)))
@@ -237,7 +213,7 @@ def _fetch_sentiment_akshare() -> dict[str, Any]:
 
         # KWEB
         try:
-            df = ak.stock_us_hist(symbol="KWEB")
+            df = _call_with_timeout(ak.stock_us_hist, 8.0, symbol="KWEB")
             if df is not None and not df.empty:
                 last = df.iloc[-1]
                 china_concepts["kweb_close"] = _to_float(last.get("收盘", last.get("close", 0)))
@@ -247,7 +223,7 @@ def _fetch_sentiment_akshare() -> dict[str, Any]:
 
         # FTSE A50 (510050)
         try:
-            df = ak.stock_zh_a_spot_em()
+            df = _call_with_timeout(ak.stock_zh_a_spot_em, 8.0)
             if df is not None and not df.empty:
                 for _, row in df.iterrows():
                     code = str(row.get("代码", "")).strip()
@@ -414,9 +390,13 @@ def _fetch_industry_top_stocks_akshare(limit: int = 10) -> list[dict[str, Any]]:
                         if not code:
                             continue
                         sp = spot_map.get(code)
-                        name = sp["name"] if sp else str(s.get("名称", s.get("name", "")).strip())
-                        price = sp["price"] if sp else 0.0
-                        change = sp["change_pct"] if sp else 0.0
+                        # 无实时行情时绝不返回 price=0.0（0 永远不是有效股价），
+                        # 跳过该股；整行业无行情则该行业为空，由上层走 mock 回退。
+                        if not sp or not sp.get("price") or sp["price"] <= 0:
+                            continue
+                        name = sp["name"] or str(s.get("名称", s.get("name", "")).strip())
+                        price = sp["price"]
+                        change = sp["change_pct"]
                         if name:
                             stocks.append({
                                 "stock_code": code,
@@ -610,7 +590,8 @@ def _fetch_individual_money_flow_akshare(limit: int = 10) -> list[dict[str, Any]
         for _, row in df.head(limit * 2).iterrows():
             name = str(row.get("名称", "")).strip()
             code = str(row.get("代码", "")).strip()
-            net_flow = _to_float(row.get("主力净流入"))
+            # akshare 列名为「今日主力净流入-净额」(非「主力净流入」)，否则恒为 0。
+            net_flow = _to_float(row.get("今日主力净流入-净额", row.get("主力净流入")))
             if name and code:
                 items.append({
                     "stock_code": code,
@@ -752,8 +733,19 @@ def _fetch_realtime_quotes_sina(stock_codes: list[str]) -> dict[str, dict[str, A
                 timeout=5,
             )
             resp.encoding = "gbk"
-            for raw_code, line in zip(batch, resp.text.strip().split("\n")):
+            batch_set = set(batch)
+            for line in resp.text.strip().split("\n"):
                 if '="' not in line:
+                    continue
+                # 解析响应行内嵌代码（var hq_str_sh600519=…），按代码而非位置对应，
+                # 避免新浪返回顺序变化/丢行时把 A 股价格错配给 B 股（股价零容忍）。
+                try:
+                    head = line.split("=", 1)[0]
+                    prefix = head.rsplit("_", 1)[-1]
+                    raw_code = prefix[2:] if len(prefix) > 2 and prefix[:2] in ("sh", "sz", "bj") else ""
+                except Exception:
+                    raw_code = ""
+                if not raw_code or raw_code not in batch_set:
                     continue
                 payload = line.split('"', 2)[1]
                 if not payload:
@@ -808,7 +800,7 @@ def fetch_realtime_quotes(stock_codes: list[str]) -> dict[str, dict[str, Any]]:
     if not _breaker.is_open("akshare_spot"):
         try:
             import akshare as ak
-            df = ak.stock_zh_a_spot_em()
+            df = _call_with_timeout(ak.stock_zh_a_spot_em, 8.0)
             if df is not None and not df.empty:
                 for _, row in df.iterrows():
                     code = str(row.get("代码", "")).strip()
@@ -878,7 +870,7 @@ def fetch_industry_news(limit: int = 20, industry: str | None = None) -> list[di
             codes = INDUSTRY_STOCK_MAP[industry]
             for code in codes:
                 try:
-                    df = ak.stock_news_em(symbol=code)
+                    df = _call_with_timeout(ak.stock_news_em, 8.0, symbol=code)
                     if df is not None and not df.empty:
                         for _, row in df.head(limit // len(codes) + 1).iterrows():
                             title = str(row.get("新闻标题", row.get("title", "")).strip())
@@ -901,7 +893,7 @@ def fetch_industry_news(limit: int = 20, industry: str | None = None) -> list[di
             major_stocks = ["600519", "300750", "601318", "000333", "688981"]
             for code in major_stocks:
                 try:
-                    df = ak.stock_news_em(symbol=code)
+                    df = _call_with_timeout(ak.stock_news_em, 8.0, symbol=code)
                     if df is not None and not df.empty:
                         for _, row in df.head(limit // len(major_stocks) + 1).iterrows():
                             title = str(row.get("新闻标题", row.get("title", "")).strip())
@@ -995,7 +987,7 @@ def get_cached_industry_news_grouped() -> dict[str, Any]:
     # Return cached grouped news with freshness metadata. Stale cache is still
     # returned (better than empty) but `stale=True` flags it for the caller.
     with _GROUPED_LOCK:
-        data = _GROUPED_CACHE["data"]
+        data = list(_GROUPED_CACHE["data"])
         ts = _GROUPED_CACHE["ts"]
     now = time.time()
     age = now - ts if ts else float("inf")

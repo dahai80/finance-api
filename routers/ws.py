@@ -11,11 +11,20 @@ router = APIRouter(tags=["websocket"])
 log = get_logger("finance.ws")
 
 ACTIVE_CONNECTIONS: set[WebSocket] = set()
+MAX_WS_CONNECTIONS = 100
 
 
 @router.websocket("/ws/alerts")
 async def websocket_alerts(websocket: WebSocket):
     await websocket.accept()
+    if len(ACTIVE_CONNECTIONS) >= MAX_WS_CONNECTIONS:
+        log.warning("ws rejected: connection cap %d reached", MAX_WS_CONNECTIONS)
+        try:
+            await websocket.send_text('{"error":"connection_cap_reached"}')
+            await websocket.close(code=1008)
+        except Exception:
+            pass
+        return
     ACTIVE_CONNECTIONS.add(websocket)
     log.info("ws connected, total=%d", len(ACTIVE_CONNECTIONS))
     try:

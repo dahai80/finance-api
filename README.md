@@ -15,8 +15,15 @@ Next.js Frontend → API Proxy → finance-api (FastAPI) → PostgreSQL + Redis 
 - **多源回退 + 熔断**：`data_provider/multi_source_fetcher.py` 维护线程安全的熔断器（`_CircuitBreaker`），单源连续失败自动熔断，自动切换备用源；全部失效时返回 mock 并打标。
 - **数据可信度信封**：所有可能回退 mock 的接口统一返回 `{data, source: "real"|"mock", ok: bool}`，前端据此显示「模拟数据」徽标，绝不把伪造数据当真实数据呈现。
 - **股价零伪造**：`/api/market/quotes` 只返回真实行情（新浪 hq 实时报价），无 mock 分支；部分获取失败时返回已得部分，不编造价格。
-- **并发安全**：DB/Redis 连接池采用 `asyncio.Lock` 双检锁单例；熔断器、行业动态缓存均用 `threading.Lock` 保护；WebSocket 广播先快照连接集合避免「迭代中修改」。
-- **超时不阻塞事件循环**：同步数据源调用通过 daemon 线程 + `queue.Queue` 实现超时（`signal.alarm` 仅主线程可用，故替换）。
+- **实时价鲜活标志**：自选股详情额外返回 `price_live: bool`。`current_price` 必须来自新浪实时报价才置 `true`；实时取价失败时回落到昨日收盘价并置 `price_live=false`，前端显示「价格非实时」徽标。`ok` 同时要求 `price_live`——缓存中的旧收盘价绝不会被当成当前价呈现给交易决策。
+- **字段名对齐数据源**：个股资金流使用 akshare 真实列名（`主力净流入-净额`/`大单净流入-净额`/`中单净流入-净额`/`小单净流入-净额`），行业资金流使用 `行业`/`净额`；行业排名按个股**真实所属行业**（`stock_individual_info_em`）在资金流表中定位并排序，不再取最后一条或硬编码 `pe_vs_industry`；`disclosed_info` 的财务指标无实盘来源，恒为 `is_mock=true`，且不伪造公告文本。
+- **并发安全**：DB/Redis 连接池采用 `asyncio.Lock` 双检锁单例；`storage.close()` 同样在锁内执行并吞异常，避免并发关闭双释放；`upsert_ipo` 包在事务内，单行失败整体回滚；熔断器、行业动态缓存均用 `threading.Lock` 保护；WebSocket 广播先快照连接集合避免「迭代中修改」。
+- **超时不阻塞事件循环**：所有同步 akshare 调用统一走 `async_utils.call_with_timeout`（daemon 线程 + `queue.Queue`，`signal.alarm` 仅主线程可用故替换），既不阻塞事件循环也不泄漏执行器线程；`build_detail` 每个维度外加 15s `wait_for`，任一维度超时即降级 mock 不拖垮整体。
+- **后台任务强引用**：`async_utils.spawn_background_task` 持有 `asyncio.Task` 强引用集合并回调清理，避免 `asyncio.create_task` 返回的 Task 被 GC 中途回收（路由层 cache-first 刷新全部改用此助手）。
+- **优雅关闭**：lifespan 以 `try/finally` 包裹，`sched.shutdown(wait=False)` 不等待挂起任务，`storage.close()` 限时 10s，确保进程能快速退出不被卡死。
+- **调度健壮性**：所有 `add_job` 带 `replace_existing=True`（重复启动不崩）、`misfire_grace_time=300`、`coalesce=True`（积压合并执行）；IPO 同步的逐行评分独立 try/except，单行失败不影响其余。
+- **输入边界**：`/api/ipo` 列表对 `limit/offset/min_score/search/status` 做上下界裁剪，防止无界结果集与负偏移；WebSocket 连接上限 100，超出礼貌关闭。
+- **错误不外泄**：全局异常中间件返回通用 `{"error":"internal_error","ok":false}`，不向客户端暴露异常类型与消息文本。
 - **优雅降级**：Redis 不可用时资金流接口返回空数组并告警，而非抛 500；调度任务全部 try/except，单任务失败不影响其他任务。
 - **真实健康检查**：`/health` 实际探测 DB（`SELECT 1`）与 Redis（`ping`），返回 `ok`/`degraded` 就绪状态。
 - **缓存优先 + 实时价覆盖**：高耗时接口（行业 Top 股票、行业动态、个股资金流）采用进程内 TTL 缓存 + 路由层 cache-first，命中即 <10ms 返回，缓存为空时立即返回 mock（`ok:false`）绝不阻塞用户请求，后台异步刷新填充。自选股详情缓存命中时仍用新浪实时价覆盖 `current_price` 并重算 `change_pct`，保证缓存期间价格零时延——流畅性与准确性兼得。
@@ -220,6 +227,7 @@ finance-api/
 ├── main.py                      # FastAPI 应用入口 + 全局异常中间件 + CORS
 ├── config.py                    # 配置与日志
 ├── storage.py                   # PostgreSQL + Redis 存储层（双检锁单例）
+├── async_utils.py               # 后台任务强引用 + 同步调用超时（共享助手）
 ├── scheduler.py                 # APScheduler 定时任务（8 个）
 ├── routers/                     # API 路由
 │   ├── health.py                # 健康检查（DB/Redis 探活）
