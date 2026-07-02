@@ -58,6 +58,11 @@ def _to_float(val: Any) -> float:
         return 0.0
 
 
+async def async_random_delay(min_s: float = 0.5, max_s: float = 2.0) -> None:
+    """Async random delay to avoid rate limiting."""
+    await asyncio.sleep(random.uniform(min_s, max_s))
+
+
 def _random_delay(min_s: float = 0.5, max_s: float = 2.0) -> None:
     """Random delay to avoid rate limiting."""
     time.sleep(random.uniform(min_s, max_s))
@@ -660,8 +665,31 @@ def fetch_realtime_quotes(stock_codes: list[str]) -> dict[str, dict[str, Any]]:
         return {}
 
 
-def fetch_industry_news(limit: int = 20) -> list[dict[str, Any]]:
-    """Fetch latest industry news/dynamics from AkShare East Money."""
+# Industry to representative stock codes mapping
+INDUSTRY_STOCK_MAP: dict[str, list[str]] = {
+    "半导体": ["688981", "603986", "002371"],  # 中芯国际, 兆易创新, Nordic
+    "AI算力": ["002230", "688111", "000063"],  # 科大讯飞, 金山办公, 中兴通讯
+    "新能源车": ["300750", "601012", "002594"],  # 宁德时代, 隆基绿能, 比亚迪
+    "医药生物": ["600276", "300760", "603259"],  # 恒瑞医药, 迈瑞医疗, 药明康德
+    "消费电子": ["002475", "000063", "002049"],  # 立讯精密, 中兴通讯, 紫光国微
+    "光伏": ["601012", "002129", "300274"],  # 隆基绿能, TCL科技, 中利集团
+    "军工": ["601989", "002179", "600893"],  # 中国航发, 中航光电, 航发动力
+    "银行": ["600036", "000001", "601166"],  # 招商银行, 平安银行, 兴业银行
+    "保险": ["601318", "601628", "600893"],  # 中国平安, 中国人寿, 航发动力
+    "白酒": ["600519", "000858", "000568"],  # 贵州茅台, 五粮液, 泸州老窖
+    "家电": ["000333", "002658", "000651"],  # 美的集团, 格力电器, 格力地产
+    "房地产": ["600048", "000002", "600153"],  # 招商蛇口, 万科A, 建发房地产
+    "稀土": ["600111", "000831", "600211"],  # 西藏珠峰, 昆明铜业, 黑猫股份
+    "材料": ["601899", "000630", "600547"],  # 紫金矿业, 铜陵有色, 山东黄金
+}
+
+
+def fetch_industry_news(limit: int = 20, industry: str | None = None) -> list[dict[str, Any]]:
+    """
+    Fetch latest industry news/dynamics from AkShare East Money.
+    If industry is provided, fetch news for representative stocks in that industry.
+    Otherwise, fetch general market news.
+    """
     if _breaker.is_open("akshare_news"):
         log.warning("AkShare news circuit breaker is open, skipping")
         return []
@@ -669,31 +697,75 @@ def fetch_industry_news(limit: int = 20) -> list[dict[str, Any]]:
     try:
         import akshare as ak
         _random_delay()
-        # Fetch latest market news from East Money
-        df = ak.stock_news_em(symbol="全部")
-        if df is None or df.empty:
-            return []
+        items: list[dict[str, Any]] = []
 
-        items = []
-        for _, row in df.head(limit * 3).iterrows():
-            title = str(row.get("新闻标题", row.get("title", "")).strip())
-            url = str(row.get("新闻链接", row.get("url", "")).strip())
-            pub_time = str(row.get("发布时间", row.get("pub_time", "")).strip())
-            content = str(row.get("新闻内容", row.get("content", "")).strip())
-            if title:
-                items.append({
-                    "title": title,
-                    "content": content[:200] if content else "",
-                    "pub_time": pub_time,
-                    "url": url,
-                })
+        if industry and industry in INDUSTRY_STOCK_MAP:
+            # Fetch news for representative stocks in this industry
+            codes = INDUSTRY_STOCK_MAP[industry]
+            for code in codes:
+                try:
+                    df = ak.stock_news_em(symbol=code)
+                    if df is not None and not df.empty:
+                        for _, row in df.head(limit // len(codes) + 1).iterrows():
+                            title = str(row.get("新闻标题", row.get("title", "")).strip())
+                            url = str(row.get("新闻链接", row.get("url", "")).strip())
+                            pub_time = str(row.get("发布时间", row.get("pub_time", "")).strip())
+                            content = str(row.get("新闻内容", row.get("content", "")).strip())
+                            if title:
+                                items.append({
+                                    "title": title,
+                                    "content": content[:200] if content else "",
+                                    "pub_time": pub_time,
+                                    "url": url,
+                                    "industry": industry,
+                                })
+                    _random_delay(0.3, 1.0)
+                except Exception:
+                    pass
+        else:
+            # Fetch general market news from major stocks
+            major_stocks = ["600519", "300750", "601318", "000333", "688981"]
+            for code in major_stocks:
+                try:
+                    df = ak.stock_news_em(symbol=code)
+                    if df is not None and not df.empty:
+                        for _, row in df.head(limit // len(major_stocks) + 1).iterrows():
+                            title = str(row.get("新闻标题", row.get("title", "")).strip())
+                            url = str(row.get("新闻链接", row.get("url", "")).strip())
+                            pub_time = str(row.get("发布时间", row.get("pub_time", "")).strip())
+                            content = str(row.get("新闻内容", row.get("content", "")).strip())
+                            if title:
+                                items.append({
+                                    "title": title,
+                                    "content": content[:200] if content else "",
+                                    "pub_time": pub_time,
+                                    "url": url,
+                                    "industry": "",
+                                })
+                    _random_delay(0.3, 1.0)
+                except Exception:
+                    pass
+
+        # Deduplicate by title
+        seen_titles: set[str] = set()
+        unique_items: list[dict[str, Any]] = []
+        for item in items:
+            if item["title"] not in seen_titles:
+                seen_titles.add(item["title"])
+                unique_items.append(item)
+
         _breaker.record_success("akshare_news")
-        log.info("fetched %d industry news items", len(items))
-        return items[:limit]
+        log.info("fetched %d unique industry news items", len(unique_items))
+        return unique_items[:limit]
     except Exception as exc:
         _breaker.record_failure("akshare_news")
         log.warning("AkShare industry news failed: %s", exc)
         return []
+
+
+def get_industry_list() -> list[str]:
+    """Return the list of available industries."""
+    return list(INDUSTRY_STOCK_MAP.keys())
 
 
 # ── Public API Summary ─────────────────────────────────────────────────
@@ -705,4 +777,5 @@ __all__ = [
     "fetch_industry_top_stocks",
     "fetch_realtime_quotes",
     "fetch_industry_news",
+    "get_industry_list",
 ]

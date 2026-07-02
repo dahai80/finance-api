@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from config import get_logger, settings
+from data_provider import multi_source_fetcher
 import storage
 
 router = APIRouter(prefix="/api/industry", tags=["industry"])
@@ -21,9 +22,23 @@ class IndustryEventCreate(BaseModel):
     event_time: Optional[str] = None
 
 
+def _validate_limit(limit: int, max_val: int = 200) -> int:
+    """Validate and clamp limit parameter."""
+    if limit < 1:
+        raise HTTPException(status_code=400, detail="limit must be >= 1")
+    return min(limit, max_val)
+
+
+@router.get("/list")
+async def list_industries() -> list[str]:
+    """Get available industry list."""
+    return multi_source_fetcher.get_industry_list()
+
+
 @router.get("/events")
 async def get_industry_events(limit: int = 20) -> list[dict[str, Any]]:
     log.info("GET /api/industry/events limit=%d", limit)
+    limit = _validate_limit(limit)
     return await storage.get_industry_events(limit)
 
 
@@ -37,7 +52,6 @@ async def add_industry_event(event: IndustryEventCreate) -> dict[str, Any]:
         except ValueError:
             pass
 
-    # Default to current time if not provided (DB has NOT NULL constraint)
     if time_val is None:
         time_val = datetime.now()
 
@@ -55,89 +69,47 @@ async def add_industry_event(event: IndustryEventCreate) -> dict[str, Any]:
 async def get_industry_top_stocks(limit: int = 20) -> list[dict[str, Any]]:
     """Get top performing stocks by industry with multi-source fallback."""
     log.info("GET /api/industry/top-stocks limit=%d", limit)
-    if limit < 1 or limit > 200:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    limit = _validate_limit(limit)
     try:
-        return _fetch_industry_top_stocks(limit)
+        return multi_source_fetcher.fetch_industry_top_stocks(limit)
     except Exception as exc:
         log.exception("top_stocks failed")
         return _mock_industry_top_stocks(limit)
 
 
 @router.get("/news")
-async def get_industry_news(limit: int = 20) -> list[dict[str, Any]]:
-    """Get latest industry dynamics/news from East Money."""
-    log.info("GET /api/industry/news limit=%d", limit)
-    if limit < 1 or limit > 200:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+async def get_industry_news(
+    limit: int = 20,
+    industry: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Get latest industry dynamics/news from East Money.
+
+    Args:
+        limit: Number of news items to return (1-200)
+        industry: Optional industry filter (e.g., "半导体", "AI算力")
+    """
+    log.info("GET /api/industry/news limit=%d industry=%s", limit, industry)
+    limit = _validate_limit(limit)
     try:
-        return _fetch_industry_news(limit)
+        return multi_source_fetcher.fetch_industry_news(limit, industry=industry)
     except Exception as exc:
         log.exception("industry_news failed")
         return _mock_industry_news(limit)
 
 
-def _to_float(val: Any) -> float:
-    if val is None:
-        return 0.0
+@router.post("/trigger/top-stocks")
+async def trigger_industry_top_stocks() -> dict[str, Any]:
+    """Manually trigger industry top stocks data fetch."""
+    log.info("POST /api/industry/trigger/top-stocks")
     try:
-        import math
-        result = float(str(val).replace(",", "").replace(" ", ""))
-        if math.isnan(result) or math.isinf(result):
-            return 0.0
-        return result
-    except Exception:
-        return 0.0
+        items = multi_source_fetcher.fetch_industry_top_stocks(10)
+        return {"status": "ok", "count": len(items)}
+    except Exception as exc:
+        log.exception("trigger industry_top_stocks failed")
+        return {"status": "error", "message": str(exc)}
 
 
-def _fetch_industry_top_stocks(limit: int) -> list[dict[str, Any]]:
-    """Fetch top stocks by industry from AkShare."""
-    try:
-        if settings.akshare_mock:
-            return _mock_industry_top_stocks(limit)
-        import akshare as ak
-        df = ak.stock_individual_fund_flow_rank()
-        if df is None or df.empty:
-            return _mock_industry_top_stocks(limit)
-        items = []
-        for _, row in df.head(limit).iterrows():
-            items.append({
-                "code": str(row.get("代码", "")),
-                "name": str(row.get("名称", "")),
-                "industry": str(row.get("行业", "")),
-                "change_pct": _to_float(row.get("涨跌幅")),
-                "main_net": _to_float(row.get("主力净流入-净额")),
-                "main_net_rate": _to_float(row.get("主力净流入-净额差")),
-            })
-        return items if items else _mock_industry_top_stocks(limit)
-    except Exception:
-        return _mock_industry_top_stocks(limit)
-
-
-def _fetch_industry_news(limit: int) -> list[dict[str, Any]]:
-    """Fetch industry news from East Money."""
-    try:
-        if settings.akshare_mock:
-            return _mock_industry_news(limit)
-        import akshare as ak
-        df = ak.stock_news_em(symbol="600519")
-        if df is None or df.empty:
-            return _mock_industry_news(limit)
-        items = []
-        for _, row in df.head(limit).iterrows():
-            items.append({
-                "title": str(row.get("新闻标题", row.get("title", ""))),
-                "digest": str(row.get("新闻内容", row.get("digest", ""))),
-                "source": str(row.get("媒体来源", row.get("source", ""))),
-                "ctime": str(row.get("发布时间", row.get("ctime", ""))),
-                "url": str(row.get("新闻链接", row.get("url", ""))),
-            })
-        return items if items else _mock_industry_news(limit)
-    except Exception:
-        return _mock_industry_news(limit)
-
+# ── Mock Data ───────────────────────────────────────────────────────────
 
 def _mock_industry_top_stocks(limit: int) -> list[dict[str, Any]]:
     stocks = [

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
+from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from config import get_logger, settings
 import storage
@@ -13,9 +17,23 @@ from scheduler import init_scheduler
 log = get_logger("finance.main")
 
 
+async def exception_handler_middleware(request: Request, call_next):
+    """Global exception handler - catches unhandled errors and returns structured responses."""
+    try:
+        return await call_next(request)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("Unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc), "type": type(exc).__name__},
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("finance-api startup, mock=%s", settings.akshare_mock)
+    log.info("finance-api startup, mock=%s force_real=%s", settings.akshare_mock, settings.force_real_data)
     sched = init_scheduler()
     sched.start()
     yield
@@ -30,6 +48,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(exception_handler_middleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -49,3 +68,26 @@ app.include_router(watchlist.router)
 @app.get("/")
 async def root() -> dict:
     return {"service": "finance-api", "docs": "/docs"}
+
+
+# ============================================================
+# Response helpers - add source flag to distinguish real vs mock
+# ============================================================
+
+def ok_response(data: Any, source: str = "real") -> dict[str, Any]:
+    """Wrap a successful response with metadata."""
+    return {"data": data, "source": source, "ok": True}
+
+
+def mock_response(data: Any) -> dict[str, Any]:
+    """Wrap a mock response - raises 503 if force_real_data is set."""
+    if settings.force_real_data:
+        from fastapi.exceptions import HTTPException
+        raise HTTPException(status_code=503, detail="Data source unavailable (force_real_data mode)")
+    return {"data": data, "source": "mock", "ok": True}
+
+
+def run_async(coro):
+    """Run a synchronous function in a thread executor to avoid blocking event loop."""
+    loop = asyncio.get_event_loop()
+    return loop.run_in_executor(None, coro)

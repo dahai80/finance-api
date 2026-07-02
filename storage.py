@@ -169,10 +169,14 @@ async def update_ipo_score(stock_code: str, total: int, recommendation: str) -> 
 
 
 async def get_live_money_flow(limit: int = 30) -> list[dict[str, Any]]:
-    r = await get_redis()
-    key = "openclaw:finance:live:market_money_flow"
-    pairs = await r.zrevrange(key, 0, limit - 1, withscores=True)
-    return [{"sector": s, "flow": float(v)} for s, v in pairs]
+    try:
+        r = await get_redis()
+        key = "openclaw:finance:live:market_money_flow"
+        pairs = await r.zrevrange(key, 0, limit - 1, withscores=True)
+        return [{"sector": s, "flow": float(v)} for s, v in pairs]
+    except Exception as exc:
+        log.warning("Redis unavailable for money_flow, returning empty: %s", exc)
+        return []
 
 
 async def get_ipo_by_score(min_score: int = 60, limit: int = 20) -> list[dict[str, Any]]:
@@ -211,15 +215,18 @@ async def get_ipo_by_score(min_score: int = 60, limit: int = 20) -> list[dict[st
 
 
 async def replace_live_money_flow(items: list[dict[str, Any]]) -> None:
-    r = await get_redis()
-    key = "openclaw:finance:live:market_money_flow"
-    async with r.pipeline() as pipe:
-        await pipe.delete(key)
-        for it in items:
-            await pipe.zadd(key, {str(it["sector"]): float(it["flow"])})
-        await pipe.execute()
-    await r.publish("openclaw:finance:live:stream_trigger", "UPDATE")
-    log.info("redis zset %s refreshed, %d items", key, len(items))
+    try:
+        r = await get_redis()
+        key = "openclaw:finance:live:market_money_flow"
+        async with r.pipeline() as pipe:
+            await pipe.delete(key)
+            for it in items:
+                await pipe.zadd(key, {str(it["sector"]): float(it["flow"])})
+            await pipe.execute()
+        await r.publish("openclaw:finance:live:stream_trigger", "UPDATE")
+        log.info("redis zset %s refreshed, %d items", key, len(items))
+    except Exception as exc:
+        log.warning("Redis unavailable for replace_money_flow: %s", exc)
 
 
 async def get_industry_events(limit: int = 20) -> list[dict[str, Any]]:
