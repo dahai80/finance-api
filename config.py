@@ -23,6 +23,7 @@ class Settings:
         self.akshare_mock: bool = os.environ.get("FINANCE_AKSHARE_MOCK", "0") == "1"
         self.force_real_data: bool = os.environ.get("FINANCE_FORCE_REAL_DATA", "0") == "1"
         self.kronos_url: str = os.environ.get("KRONOS_URL", "http://localhost:8001")
+        self.kronos_timeout: int = int(os.environ.get("KRONOS_TIMEOUT", "15"))
         self.llm_url: str = os.environ.get("LLM_URL", "http://localhost:8080")
         self.llm_model: str = os.environ.get("LLM_MODEL", "qwen2.5-7b-instruct")
         self.llm_timeout: int = int(os.environ.get("LLM_TIMEOUT", "60"))

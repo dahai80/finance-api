@@ -77,7 +77,7 @@ def score_ipo(item: dict[str, Any]) -> dict[str, Any]:
     else:
         scores["low_risk"] = 10.0
 
-    total = int(sum(scores.values()))
+    total = int(round(sum(scores.values())))
     if total >= 70:
         rec = "HIGH"
     elif total >= 50:

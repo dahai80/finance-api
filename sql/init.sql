@@ -20,7 +20,8 @@ CREATE TABLE finance_control.fc_stock_snapshot (
     generated_content TEXT,
     status VARCHAR(20) DEFAULT 'PENDING',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_fc_snapshot_code_date UNIQUE (stock_code, trade_date)
 );
 CREATE INDEX idx_fc_snapshot_date_status ON finance_control.fc_stock_snapshot(trade_date, status);
 CREATE INDEX idx_fc_snapshot_code ON finance_control.fc_stock_snapshot(stock_code);
@@ -82,3 +83,15 @@ CREATE TABLE finance_control.fc_watchlist (
 INSERT INTO finance_control.fc_workflow_config (task_id, cron_expression, llm_prompt_template)
 VALUES ('ipo_sync_daily', '0 8 * * 1-5', '为新股 {stock_name}({stock_code}) 生成打新短视频分镜脚本。')
 ON CONFLICT (task_id) DO NOTHING;
+
+-- 既有库补丁：确保 fc_stock_snapshot 上存在 (stock_code, trade_date) 唯一约束，
+-- 否则 backtest_engine.record_prediction 的 ON CONFLICT 会在运行时报错。
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'uq_fc_snapshot_code_date'
+    ) THEN
+        ALTER TABLE finance_control.fc_stock_snapshot
+            ADD CONSTRAINT uq_fc_snapshot_code_date UNIQUE (stock_code, trade_date);
+    END IF;
+END $$;

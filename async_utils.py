@@ -21,6 +21,7 @@ def spawn_background_task(coro, label: str = "bg") -> asyncio.Task | None:
         task = asyncio.create_task(coro)
     except RuntimeError:
         log.warning("spawn_background_task(%s): no running loop, skip", label)
+        coro.close()
         return None
     _bg_tasks.add(task)
 

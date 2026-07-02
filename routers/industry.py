@@ -79,7 +79,9 @@ async def get_industry_top_stocks(limit: int = 20) -> dict[str, Any]:
         spawn_background_task(multi_source_fetcher.afetch_all_industry_top_stocks(10), "industry_top_stocks")
     if cached["data"]:
         data = [{**g, "stocks": g.get("stocks", [])[:limit]} for g in cached["data"]]
-        return {"data": data, "source": "real", "ok": True}
+        # 缓存可能已过时（调度器仅交易日 08-15 刷新；深夜/周末/调度挂掉时数据陈旧）。
+        # 如实暴露 stale 并把 ok 置为 not stale——旧价不谎报为可信。
+        return {"data": data, "source": "real", "ok": not cached["stale"], "stale": cached["stale"]}
     return {"data": multi_source_fetcher._mock_industry_top_stocks(limit), "source": "mock", "ok": False}
 
 

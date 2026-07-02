@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import os
-
 import httpx
 
-from config import get_logger
+from config import get_logger, settings
 
 log = get_logger("finance.llm")
-
-LLM_BASE = os.environ.get("FINANCE_LLM_BASE_URL", "http://localhost:8080")
-LLM_MODEL = os.environ.get("FINANCE_LLM_MODEL", "qwen2.5-7b-instruct")
-LLM_TIMEOUT = float(os.environ.get("FINANCE_LLM_TIMEOUT", "60"))
 
 SCRIPT_PROMPT = """为新股 {name}({code}) 生成短视频分镜脚本。
 
@@ -29,6 +23,7 @@ SCRIPT_PROMPT = """为新股 {name}({code}) 生成短视频分镜脚本。
 
 
 async def generate_ipo_script(stock: dict) -> str | None:
+    # 统一从 settings 取 LLM 地址/模型/超时，避免与 config.py 双源漂移。
     fm = stock.get("fundamental_metrics") or {}
     prompt = SCRIPT_PROMPT.format(
         name=stock.get("stock_name", "未知"),
@@ -45,14 +40,14 @@ async def generate_ipo_script(stock: dict) -> str | None:
     try:
         async with httpx.AsyncClient() as client:
             res = await client.post(
-                f"{LLM_BASE}/v1/chat/completions",
+                f"{settings.llm_url}/v1/chat/completions",
                 json={
-                    "model": LLM_MODEL,
+                    "model": settings.llm_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 1200,
                     "temperature": 0.7,
                 },
-                timeout=LLM_TIMEOUT,
+                timeout=settings.llm_timeout,
             )
             res.raise_for_status()
             data = res.json()
@@ -60,7 +55,7 @@ async def generate_ipo_script(stock: dict) -> str | None:
             log.info("llm response ok: %d chars", len(content))
             return content
     except httpx.ConnectError:
-        log.warning("llm not available at %s (is mlx running?)", LLM_BASE)
+        log.warning("llm not available at %s (is mlx running?)", settings.llm_url)
         return None
     except Exception as exc:
         log.error("llm generation failed: %s", exc)

@@ -115,8 +115,11 @@ async def watchlist_detail(
 async def _overlay_live_price(detail: dict[str, Any], stock_code: str) -> dict[str, Any]:
     """用 Sina 实时价覆盖 detail.current_price 并重算 change_pct。
 
-    取价失败时保持缓存值不变——宁可显示稍旧的真实价，也不编造价格。
+    缓存命中时调用：缓存的 current_price 可能已过时（最长 2h），故默认标记
+    price_live=False，仅在本次成功取到鲜活正价时置 True。取价失败则保留缓存值
+    但如实标记非实时——宁可显示稍旧的真实价，也不把旧价谎报为实时。
     """
+    detail["price_live"] = False
     try:
         quotes = await multi_source_fetcher.afetch_realtime_quotes([stock_code])
         q = quotes.get(stock_code)
@@ -124,6 +127,7 @@ async def _overlay_live_price(detail: dict[str, Any], stock_code: str) -> dict[s
             live_price = float(q["price"])
             if live_price <= 0:
                 log.warning("watchlist overlay non-positive live price for %s: %s", stock_code, live_price)
+                detail["ok"] = (detail.get("source") != "mock") and detail["price_live"]
                 return detail
             detail["current_price"] = live_price
             detail["price_live"] = True
@@ -135,6 +139,7 @@ async def _overlay_live_price(detail: dict[str, Any], stock_code: str) -> dict[s
                 detail["change_pct"] = 0.0
     except Exception as exc:
         log.warning("watchlist detail live price overlay failed for %s: %s", stock_code, exc)
+    detail["ok"] = (detail.get("source") != "mock") and detail["price_live"]
     return detail
 
 

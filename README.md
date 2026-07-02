@@ -25,9 +25,38 @@ Next.js Frontend → API Proxy → finance-api (FastAPI) → PostgreSQL + Redis 
 - **输入边界**：`/api/ipo` 列表对 `limit/offset/min_score/search/status` 做上下界裁剪，防止无界结果集与负偏移；WebSocket 连接上限 100，超出礼貌关闭。
 - **错误不外泄**：全局异常中间件返回通用 `{"error":"internal_error","ok":false}`，不向客户端暴露异常类型与消息文本。
 - **优雅降级**：Redis 不可用时资金流接口返回空数组并告警，而非抛 500；调度任务全部 try/except，单任务失败不影响其他任务。
-- **真实健康检查**：`/health` 实际探测 DB（`SELECT 1`）与 Redis（`ping`），返回 `ok`/`degraded` 就绪状态。
+- **真实健康检查**：`/health` 实际探测 DB（`SELECT 1`）与 Redis（`ping`），每探测加 2-3s `wait_for` 超时防半开连接挂起；任一依赖不可用即返回 `degraded` **并置 HTTP 503**，负载均衡只看状态码时绝不把流量路由到依赖掉线的节点（伪健康检查比没有更糟）。错误信息只暴露异常类型，不泄露连接串。
 - **缓存优先 + 实时价覆盖**：高耗时接口（行业 Top 股票、行业动态、个股资金流）采用进程内 TTL 缓存 + 路由层 cache-first，命中即 <10ms 返回，缓存为空时立即返回 mock（`ok:false`）绝不阻塞用户请求，后台异步刷新填充。自选股详情缓存命中时仍用新浪实时价覆盖 `current_price` 并重算 `change_pct`，保证缓存期间价格零时延——流畅性与准确性兼得。
 - **生产时延**：全量接口实测 P50 < 30ms（行情直连新浪 ~30ms，其余缓存命中 < 10ms），冷启动不阻塞。
+
+### 第二轮全量评审加固（round 2）
+
+第二轮对全量代码做的纵深加固，聚焦股价零容忍与配置漂移：
+
+- **NaN 绕过防御**：`watchlist_fetcher._f` 把 akshare 单元格统一解析为 float，NaN/inf/非法一律归 0；K 线解析用 `if not (close > 0): continue`（`NaN <= 0` 为 False，旧 `<= 0` 守卫放过 NaN 污染股价）。所有 open/high/low/close/volume 字段必经 `_f`。
+- **section 级 source 诚实**：`build_detail` 的 `any_mock` 排除 `disclosed_info`——该维度无实盘来源恒为 mock 是设计如此，不应因此把整条详情打成 `source=mock`（旧逻辑让 `price_live` 徽标成为死代码，实时价永远显示成模拟）。
+- **overlay 价格鲜活重算**：`_overlay_live_price` 进入即置 `price_live=false`（缓存价最久 2h 前），仅当新浪实时价为正时置 true，并在所有返回路径（早退/异常/正常）重算 `ok = source!=mock and price_live`——缓存里的旧收盘价绝不冒充当前价。
+- **唯一约束补齐**：`fc_stock_snapshot` 加 `UNIQUE(stock_code, trade_date)`，`backtest_engine.record_prediction` 的 `ON CONFLICT` 依赖它，否则运行时炸 500；`init.sql` 既在 `CREATE TABLE` 内声明，又追加幂等 `DO $$ ... ADD CONSTRAINT` 给既有库打补丁。
+- **配置单源**：`kronos_client`/`llm_generator` 原各自读 `FINANCE_KRONOS_*`/`FINANCE_LLM_*` 环境变量，与 `config.py` 的 `KRONOS_URL`/`LLM_URL` 双源漂移、生产静默连错主机；统一改读 `settings.*`，并新增 `settings.kronos_timeout`。
+- **kronos 预测校验**：`_valid_pred` 丢弃 open/high/low/close 非有限正数的预测，脏数据不透传客户端。
+- **Redis socket 超时**：`aioredis.from_url` 显式 `socket_timeout=2, socket_connect_timeout=2`，Redis 卡死时快速失败而非堆积挂起。
+- **close() 竞态修复**：`storage.close()` 先把全局 `_pool`/`_redis` 置空再 `await close()`，避免关闭期间 `get_pg` fast-path 把半关池子发给并发请求。
+- **回测天数边界**：`/api/backtest` 的 `days` 裁到 `[1, 365]`，极端值不再触发 `OverflowError→500`。
+- **行业 Top 股票 stale 标志**：`ok` 跟随缓存 `stale` 状态，盘后/调度挂掉时陈旧价不标 `ok=true`。
+- **tushare 行情留空**：`_fetch_industry_top_stocks_tushare` 的 `price/change_pct` 留 `None`（tushare ths_cons 只给分类不给行情），不再用 `0.0` 冒充真实价。
+- **coroutine 关闭**：`spawn_background_task` 在无运行 loop 分支补 `coro.close()`，消除「coroutine was never awaited」告警。
+- **IPO 评分舍入**：`score_ipo` 总分 `int(round(...))`，修正 69.9 被截成 69 误判 HIGH→MID。
+
+### 已知技术债（已评估，非股价关键，留待后续）
+
+- 调度器 `_job_ipo_sync` 走同步 `score_ipo`，手动 `/api/ipo/sync` 走异步 `_score_with_industry_heat`（含行业热度），两条评分路径不一致；当前以手动路由为准。
+- `generate_batch` 串行调 LLM，量大时慢；非股价路径，暂未并发化。
+- 缺索引：`fc_industry_events(event_time)`、`fc_ipo_factory(ipo_date)`——数据量增大后需补。
+- `TIMESTAMPTZ` 与 `TIMESTAMP` 在 `init.sql` 中混用，后续统一为带时区。
+- tushare 同步调用未加超时（分支休眠，需 `TUSHARE_TOKEN` 才生效）。
+- kronos 微服务在 `ImportError` 时返回桩数据，需在 kronos-service 侧补 `source` 标志区分桩与真实预测。
+- 情绪快照中部分指数价可能为 0（MEDIUM），IPO 详情 `price=0.0` 可能被当真实（MEDIUM）——非实时交易路径。
+- 测试套件 40 例中约 18 例偏轻量，关键路径（overlay price_live、close 竞态、kronos 校验）尚无专测，后续补强。
 
 > 单实例无法物理保证 99.99999% 可用性，以上为代码层的稳定性与可信度保障。
 

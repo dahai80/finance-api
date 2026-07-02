@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-import queue
 import random
 import threading
 import time
@@ -460,11 +459,13 @@ def _fetch_industry_top_stocks_tushare(limit: int = 10) -> list[dict[str, Any]]:
                         code = str(s.get("ts_code", "")).strip()
                         name = str(s.get("name", "")).strip()
                         if code and name:
+                            # tushare ths_cons 只给分类不给行情——price/change_pct 留 None，
+                            # 由上层决定是否叠加实时价；绝不用 0.0 冒充真实价（违股价零容忍）。
                             stocks.append({
                                 "stock_code": code.replace(".SH", "").replace(".SZ", ""),
                                 "stock_name": name,
-                                "price": 0.0,
-                                "change_pct": 0.0,
+                                "price": None,
+                                "change_pct": None,
                             })
                     if stocks:
                         seen.add(industry)

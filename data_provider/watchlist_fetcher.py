@@ -3,12 +3,23 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import date, datetime, timedelta
-from typing import Any
 
 from config import get_logger, settings
 from async_utils import call_with_timeout
 
 log = get_logger("finance.watchlist_fetcher")
+
+
+def _f(val) -> float:
+    # 解析 akshare 单元格为 float；NaN/inf/非法一律归 0。原始 float() 会放过 NaN
+    #（NaN <= 0 为 False），从而污染股价——所有价格字段必须经 _f。
+    try:
+        v = 0.0 if val is None else float(str(val).replace(",", "").replace(" ", ""))
+    except (ValueError, TypeError):
+        return 0.0
+    if v != v or v == float("inf") or v == float("-inf"):
+        return 0.0
+    return v
 
 # ── Sentiment keyword lists ────────────────────────────────────────────────
 
@@ -267,17 +278,19 @@ def _fetch_price_history_live(stock_code: str, days: int = 90) -> tuple[dict, bo
 
         kline: list[dict] = []
         for _, row in df.iterrows():
-            close = float(row.get("收盘", 0))
-            if close <= 0:
+            close = _f(row.get("收盘"))
+            # NaN 会绕过 `<= 0`（NaN <= 0 为 False）；用 `not (close > 0)` 同时拒绝
+            # NaN/0/负数——停牌或缺失的 K 线绝不能漏成 current_price（股价零容忍）。
+            if not (close > 0):
                 log.debug("skip zero/invalid close row for %s", stock_code)
                 continue
             kline.append({
                 "date": str(row.get("日期", ""))[:10],
-                "open": float(row.get("开盘", 0)),
-                "high": float(row.get("最高", 0)),
-                "low": float(row.get("最低", 0)),
+                "open": _f(row.get("开盘")),
+                "high": _f(row.get("最高")),
+                "low": _f(row.get("最低")),
                 "close": close,
-                "volume": float(row.get("成交量", 0)),
+                "volume": _f(row.get("成交量")),
             })
 
         if not kline:
@@ -507,7 +520,10 @@ async def build_detail(stock_code: str, days: int = 90) -> dict:
         "capital_flow": "mock" if cf_mock else "real",
         "sentiment": "mock" if sm_mock else "real",
     }
-    any_mock = any(v == "mock" for v in sources.values())
+    # disclosed_info 财务数据无实时来源（mock-by-design）——绝不能污染聚合信号。
+    # source/ok 只反映价格关键维度，UI 的"价格非实时"徽标
+    #（source != "mock" && !price_live）才可达；sources["disclosed_info"] 仍如实标 mock。
+    any_mock = any(v == "mock" for k, v in sources.items() if k != "disclosed_info")
 
     # Live quote takes precedence over price_history end_price (the last bar's
     # close = previous trading day, stale intraday). Sina quotes are accurate

@@ -39,25 +39,35 @@ async def get_redis() -> aioredis.Redis:
         if _redis is not None:
             return _redis
         log.info("opening redis url=%s", settings.redis_url)
-        _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+        # 显式 socket 超时：Redis 卡死时 get_redis 之后的所有调用不会无限挂起，
+        # 保护 /health 与缓存优先路径在依赖掉线时快速失败而非堆积。
+        _redis = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_timeout=2,
+            socket_connect_timeout=2,
+        )
     return _redis
 
 
 async def close() -> None:
+    # 先把全局引用置空，再 await close()——否则 close() 期间 get_pg/get_redis 的
+    # fast-path（`if _pool is not None: return _pool`）会把正在关闭的池子发出去，
+    # 新请求拿到半关连接。先置空让并发请求走重建分支。
     global _pool, _redis
     async with _init_lock:
-        if _pool is not None:
+        pool, _pool = _pool, None
+        redis, _redis = _redis, None
+        if pool is not None:
             try:
-                await _pool.close()
+                await pool.close()
             except Exception:
                 log.exception("asyncpg pool close failed")
-            _pool = None
-        if _redis is not None:
+        if redis is not None:
             try:
-                await _redis.aclose()
+                await redis.aclose()
             except Exception:
                 log.exception("redis close failed")
-            _redis = None
 
 
 async def list_ipo(
