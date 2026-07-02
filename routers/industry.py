@@ -71,7 +71,7 @@ async def get_industry_top_stocks(limit: int = 20) -> list[dict[str, Any]]:
     log.info("GET /api/industry/top-stocks limit=%d", limit)
     limit = _validate_limit(limit)
     try:
-        return multi_source_fetcher.fetch_industry_top_stocks(limit)
+        return await multi_source_fetcher.afetch_industry_top_stocks(limit)
     except Exception as exc:
         log.exception("top_stocks failed")
         return _mock_industry_top_stocks(limit)
@@ -91,7 +91,7 @@ async def get_industry_news(
     log.info("GET /api/industry/news limit=%d industry=%s", limit, industry)
     limit = _validate_limit(limit)
     try:
-        return multi_source_fetcher.fetch_industry_news(limit, industry=industry)
+        return await multi_source_fetcher.afetch_industry_news(limit, industry=industry)
     except Exception as exc:
         log.exception("industry_news failed")
         return _mock_industry_news(limit)
@@ -102,7 +102,7 @@ async def trigger_industry_top_stocks() -> dict[str, Any]:
     """Manually trigger industry top stocks data fetch."""
     log.info("POST /api/industry/trigger/top-stocks")
     try:
-        items = multi_source_fetcher.fetch_industry_top_stocks(10)
+        items = await multi_source_fetcher.afetch_industry_top_stocks(10)
         return {"status": "ok", "count": len(items)}
     except Exception as exc:
         log.exception("trigger industry_top_stocks failed")

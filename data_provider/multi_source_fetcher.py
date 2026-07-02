@@ -172,6 +172,12 @@ def fetch_money_flow() -> list[dict[str, Any]]:
     return _mock_money_flow()
 
 
+async def afetch_money_flow() -> list[dict[str, Any]]:
+    """Async version of fetch_money_flow — runs in thread executor."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, fetch_money_flow)
+
+
 # ── Sentiment Fetchers ────────────────────────────────────────────────
 
 def _fetch_sentiment_akshare() -> dict[str, Any]:
@@ -317,6 +323,12 @@ def fetch_sentiment() -> dict[str, Any]:
 
     log.warning("All sentiment sources failed, returning mock data")
     return _mock_sentiment()
+
+
+async def afetch_sentiment() -> dict[str, Any]:
+    """Async version of fetch_sentiment — runs in thread executor."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, fetch_sentiment)
 
 
 # ── Industry Top Stocks Fetchers ───────────────────────────────────────
@@ -491,6 +503,12 @@ def fetch_industry_top_stocks(limit: int = 10) -> list[dict[str, Any]]:
     return []
 
 
+async def afetch_industry_top_stocks(limit: int = 10) -> list[dict[str, Any]]:
+    """Async version of fetch_industry_top_stocks — runs in thread executor."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: fetch_industry_top_stocks(limit))
+
+
 # ── Mock Data (Last Resort) ───────────────────────────────────────────
 
 def _mock_money_flow() -> list[dict[str, Any]]:
@@ -601,6 +619,12 @@ def fetch_individual_money_flow(limit: int = 10) -> list[dict[str, Any]]:
     return _mock_individual_money_flow(limit)
 
 
+async def afetch_individual_money_flow(limit: int = 10) -> list[dict[str, Any]]:
+    """Async version of fetch_individual_money_flow — runs in thread executor."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: fetch_individual_money_flow(limit))
+
+
 def _mock_individual_money_flow(limit: int = 10) -> list[dict[str, Any]]:
     """Generate realistic mock individual stock money flow data."""
     stocks = [
@@ -663,6 +687,12 @@ def fetch_realtime_quotes(stock_codes: list[str]) -> dict[str, dict[str, Any]]:
         _breaker.record_failure("akshare_spot")
         log.warning("AkShare spot quotes failed: %s", exc)
         return {}
+
+
+async def afetch_realtime_quotes(stock_codes: list[str]) -> dict[str, dict[str, Any]]:
+    """Async version of fetch_realtime_quotes — runs in thread executor."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: fetch_realtime_quotes(stock_codes))
 
 
 # Industry to representative stock codes mapping
@@ -763,6 +793,12 @@ def fetch_industry_news(limit: int = 20, industry: str | None = None) -> list[di
         return []
 
 
+async def afetch_industry_news(limit: int = 20, industry: str | None = None) -> list[dict[str, Any]]:
+    """Async version of fetch_industry_news — runs in thread executor."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: fetch_industry_news(limit, industry))
+
+
 def get_industry_list() -> list[str]:
     """Return the list of available industries."""
     return list(INDUSTRY_STOCK_MAP.keys())
@@ -772,10 +808,16 @@ def get_industry_list() -> list[str]:
 
 __all__ = [
     "fetch_money_flow",
+    "afetch_money_flow",
     "fetch_sentiment",
+    "afetch_sentiment",
     "fetch_individual_money_flow",
+    "afetch_individual_money_flow",
     "fetch_industry_top_stocks",
+    "afetch_industry_top_stocks",
     "fetch_realtime_quotes",
+    "afetch_realtime_quotes",
     "fetch_industry_news",
+    "afetch_industry_news",
     "get_industry_list",
 ]

@@ -53,7 +53,7 @@ async def _job_money_flow() -> None:
     """盘中资金流刷新 (每5分钟, 9:30-15:00)"""
     log.info("scheduled job: money_flow")
     try:
-        items = multi_source_fetcher.fetch_money_flow()
+        items = await multi_source_fetcher.afetch_money_flow()
         if items:
             await storage.replace_live_money_flow(items)
             log.info("money_flow: refreshed %d sectors", len(items))
@@ -73,9 +73,9 @@ async def _job_premarket_sentiment() -> None:
     try:
         from datetime import date
 
-        sentiment = multi_source_fetcher.fetch_sentiment()
+        sentiment = await multi_source_fetcher.afetch_sentiment()
         prev_flow = await storage.get_live_money_flow(20)
-        individual_flow = multi_source_fetcher.fetch_individual_money_flow(20)
+        individual_flow = await multi_source_fetcher.afetch_individual_money_flow(20)
 
         await storage.upsert_sentiment_snapshot(
             trade_date=date.today(),

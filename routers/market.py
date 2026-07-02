@@ -56,7 +56,7 @@ async def get_individual_money_flow(limit: int = 20) -> list[dict[str, Any]]:
     log.info("GET /api/market/individual-money-flow limit=%d", limit)
     limit = _validate_limit(limit)
     try:
-        return multi_source_fetcher.fetch_individual_money_flow(limit)
+        return await multi_source_fetcher.afetch_individual_money_flow(limit)
     except Exception as exc:
         log.exception("individual_money_flow failed")
         return _mock_individual_money_flow(limit)
@@ -82,7 +82,7 @@ async def get_realtime_quotes(codes: str) -> dict[str, Any]:
             raise HTTPException(status_code=400, detail=f"invalid stock code: {code}")
 
     try:
-        quotes = multi_source_fetcher.fetch_realtime_quotes(stock_codes)
+        quotes = await multi_source_fetcher.afetch_realtime_quotes(stock_codes)
         if quotes:
             return quotes
         return {code: _mock_quote(code) for code in stock_codes}
@@ -149,7 +149,7 @@ async def save_sentiment_snapshot() -> dict[str, Any]:
     log.info("POST /api/market/sentiment/snapshot")
     money_flow = await storage.get_live_money_flow(limit=10)
 
-    sentiment = multi_source_fetcher.fetch_sentiment()
+    sentiment = await multi_source_fetcher.afetch_sentiment()
     today = date.today()
     await storage.upsert_sentiment_snapshot(
         trade_date=today,
@@ -195,7 +195,7 @@ async def trigger_money_flow() -> dict[str, Any]:
     """Manually trigger money flow data fetch with multi-source fallback."""
     log.info("POST /api/market/trigger/money-flow")
     try:
-        items = multi_source_fetcher.fetch_money_flow()
+        items = await multi_source_fetcher.afetch_money_flow()
         if items:
             await storage.replace_live_money_flow(items)
             log.info("trigger money_flow: refreshed %d sectors", len(items))
@@ -211,9 +211,9 @@ async def trigger_sentiment() -> dict[str, Any]:
     """Manually trigger premarket sentiment data fetch with multi-source fallback."""
     log.info("POST /api/market/trigger/sentiment")
     try:
-        sentiment = multi_source_fetcher.fetch_sentiment()
+        sentiment = await multi_source_fetcher.afetch_sentiment()
         prev_flow = await storage.get_live_money_flow(20)
-        individual_flow = multi_source_fetcher.fetch_individual_money_flow(20)
+        individual_flow = await multi_source_fetcher.afetch_individual_money_flow(20)
 
         await storage.upsert_sentiment_snapshot(
             trade_date=date.today(),
