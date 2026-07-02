@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Any, Optional
 
@@ -95,6 +96,24 @@ async def get_industry_news(
     except Exception as exc:
         log.exception("industry_news failed")
         return _mock_industry_news(limit)
+
+
+@router.get("/news/grouped")
+async def get_industry_news_grouped() -> dict[str, Any]:
+    """Latest dynamics for EVERY industry, served from an in-process cache
+    refreshed every 10 minutes by the scheduler. Sub-10ms response.
+
+    Returns {data: [{industry, items, count}], updated_at, age_seconds, stale}.
+    Triggers a background refresh when the cache is empty or stale.
+    """
+    cached = multi_source_fetcher.get_cached_industry_news_grouped()
+    if not cached["data"] or cached["stale"]:
+        asyncio.create_task(multi_source_fetcher.afetch_all_industry_news_grouped())
+    log.info(
+        "GET /api/industry/news/grouped cached=%d stale=%s",
+        len(cached["data"]), cached["stale"],
+    )
+    return cached
 
 
 @router.post("/trigger/top-stocks")

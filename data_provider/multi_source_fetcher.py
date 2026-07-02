@@ -680,7 +680,7 @@ def _fetch_realtime_quotes_sina(stock_codes: list[str]) -> dict[str, dict[str, A
         sina_codes = [_sina_code(c) for c in batch]
         try:
             resp = requests.get(
-                "http://hq.sinajs.cn/list=" + ",".join(sina_codes),
+                "https://hq.sinajs.cn/list=" + ",".join(sina_codes),
                 headers={"Referer": "https://finance.sina.com.cn"},
                 timeout=5,
             )
@@ -874,6 +874,69 @@ async def afetch_industry_news(limit: int = 20, industry: str | None = None) -> 
     """Async version of fetch_industry_news — runs in thread executor."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: fetch_industry_news(limit, industry))
+
+
+# ── Grouped per-industry news cache ────────────────────────────────────
+# Fetching news for all 14 industries sequentially is ~45s (too slow for a
+# live request). Cache it in-process and refresh from a scheduler job; the
+# API endpoint serves from cache in <10ms.
+
+_GROUPED_CACHE: dict[str, Any] = {"data": [], "ts": 0.0}
+_GROUPED_TTL = 600.0  # 10 minutes
+_GROUPED_PER_INDUSTRY = 6  # news items kept per industry
+
+
+def _fetch_one_industry_news(industry: str, per: int) -> dict[str, Any]:
+    try:
+        items = fetch_industry_news(per, industry=industry)
+        return {"industry": industry, "items": items[:per], "count": len(items)}
+    except Exception as exc:
+        log.warning("grouped industry news failed for %s: %s", industry, exc)
+        return {"industry": industry, "items": [], "count": 0, "error": str(exc)}
+
+
+def fetch_all_industry_news_grouped(per_industry: int = _GROUPED_PER_INDUSTRY) -> list[dict[str, Any]]:
+    """Fetch latest news for every industry in parallel via a thread pool.
+
+    Returns a list of {industry, items, count} sorted by industry name.
+    Each item carries an `industry` tag so the frontend can group freely.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    industries = list(INDUSTRY_STOCK_MAP.keys())
+    results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = {pool.submit(_fetch_one_industry_news, ind, per_industry): ind for ind in industries}
+        for fut in futs:
+            try:
+                results.append(fut.result())
+            except Exception as exc:
+                log.warning("grouped industry news future failed: %s", exc)
+    results.sort(key=lambda r: r["industry"])
+    _GROUPED_CACHE["data"] = results
+    _GROUPED_CACHE["ts"] = time.time()
+    total = sum(r.get("count", 0) for r in results)
+    log.info("grouped industry news refreshed: %d industries, %d items total", len(results), total)
+    return results
+
+
+async def afetch_all_industry_news_grouped(per_industry: int = _GROUPED_PER_INDUSTRY) -> list[dict[str, Any]]:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: fetch_all_industry_news_grouped(per_industry))
+
+
+def get_cached_industry_news_grouped() -> dict[str, Any]:
+    """Return cached grouped news with freshness metadata. Stale cache is still
+    returned (better than empty) but `stale=True` flags it for the caller."""
+    now = time.time()
+    age = now - _GROUPED_CACHE["ts"] if _GROUPED_CACHE["ts"] else float("inf")
+    return {
+        "data": _GROUPED_CACHE["data"],
+        "updated_at": _GROUPED_CACHE["ts"],
+        "age_seconds": round(age, 1) if _GROUPED_CACHE["ts"] else None,
+        "stale": age > _GROUPED_TTL,
+        "ttl_seconds": _GROUPED_TTL,
+    }
 
 
 def get_industry_list() -> list[str]:

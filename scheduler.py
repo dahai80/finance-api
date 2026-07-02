@@ -145,6 +145,15 @@ async def _job_daily_content() -> None:
         log.exception("daily_content failed")
 
 
+async def _job_industry_news() -> None:
+    """每10分钟刷新各行业最新动态缓存 (交易日 8:30-16:00)"""
+    log.info("scheduled job: industry_news")
+    try:
+        await multi_source_fetcher.afetch_all_industry_news_grouped()
+    except Exception as exc:
+        log.exception("industry_news failed")
+
+
 # ── Schedule registration ─────────────────────────────────────────
 
 def init_scheduler() -> AsyncIOScheduler:
@@ -155,7 +164,12 @@ def init_scheduler() -> AsyncIOScheduler:
         CronTrigger(day_of_week="mon-fri", hour="9-14", minute="*/5"),
         id="money_flow",
     )
+    scheduler.add_job(
+        _job_industry_news,
+        CronTrigger(day_of_week="mon-fri", hour="8-15", minute="*/10"),
+        id="industry_news",
+    )
     scheduler.add_job(_job_daily_content, CronTrigger(day_of_week="mon-fri", hour=15, minute=15), id="daily_content")
     scheduler.add_job(_job_watchlist_refresh, CronTrigger(day_of_week="mon-fri", hour=15, minute=30), id="watchlist_refresh")
-    log.info("scheduler: 5 jobs registered (ipo_sync, premarket_sentiment, money_flow, daily_content, watchlist_refresh)")
+    log.info("scheduler: 6 jobs registered (ipo_sync, premarket_sentiment, money_flow, industry_news, daily_content, watchlist_refresh)")
     return scheduler
