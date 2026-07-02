@@ -603,23 +603,23 @@ def _fetch_individual_money_flow_akshare(limit: int = 10) -> list[dict[str, Any]
         return []
 
 
-def fetch_individual_money_flow(limit: int = 10) -> list[dict[str, Any]]:
+def fetch_individual_money_flow(limit: int = 10) -> tuple[list[dict[str, Any]], bool]:
     """
     Fetch individual stock money flow with multi-source fallback.
     Order: AkShare → mock data.
-    Returns list sorted by main_net_inflow descending.
+    Returns (items_sorted_by_main_net_inflow_desc, is_mock).
     """
     log.info("Fetching individual money flow with multi-source fallback")
 
     result = _fetch_individual_money_flow_akshare(limit)
     if result:
-        return sorted(result, key=lambda x: x["main_net_inflow"], reverse=True)
+        return sorted(result, key=lambda x: x["main_net_inflow"], reverse=True), False
 
     log.warning("All individual money flow sources failed, returning mock data")
-    return _mock_individual_money_flow(limit)
+    return _mock_individual_money_flow(limit), True
 
 
-async def afetch_individual_money_flow(limit: int = 10) -> list[dict[str, Any]]:
+async def afetch_individual_money_flow(limit: int = 10) -> tuple[list[dict[str, Any]], bool]:
     """Async version of fetch_individual_money_flow — runs in thread executor."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: fetch_individual_money_flow(limit))

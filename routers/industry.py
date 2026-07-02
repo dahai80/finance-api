@@ -83,16 +83,28 @@ async def get_industry_news(
     limit: int = 20,
     industry: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Get latest industry dynamics/news from East Money.
+    """Get latest industry dynamics/news.
 
-    Args:
-        limit: Number of news items to return (1-200)
-        industry: Optional industry filter (e.g., "半导体", "AI算力")
+    No-industry (latest stream): served from the grouped cache — flatten all
+    industries and sort by pub_time desc. Sub-10ms, no live 5s fetch.
+    With-industry: live fetch for the requested industry only.
     """
     log.info("GET /api/industry/news limit=%d industry=%s", limit, industry)
     limit = _validate_limit(limit)
     try:
-        return await multi_source_fetcher.afetch_industry_news(limit, industry=industry)
+        if industry:
+            return await multi_source_fetcher.afetch_industry_news(limit, industry=industry)
+        # Flatten grouped cache into a latest-news stream
+        cached = multi_source_fetcher.get_cached_industry_news_grouped()
+        if not cached["data"]:
+            asyncio.create_task(multi_source_fetcher.afetch_all_industry_news_grouped())
+            return []
+        flat: list[dict[str, Any]] = []
+        for group in cached["data"]:
+            for item in group.get("items", []):
+                flat.append(item)
+        flat.sort(key=lambda x: x.get("pub_time", "") or "", reverse=True)
+        return flat[:limit]
     except Exception as exc:
         log.exception("industry_news failed")
         return _mock_industry_news(limit)

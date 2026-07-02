@@ -75,7 +75,7 @@ async def _job_premarket_sentiment() -> None:
 
         sentiment = await multi_source_fetcher.afetch_sentiment()
         prev_flow = await storage.get_live_money_flow(20)
-        individual_flow = await multi_source_fetcher.afetch_individual_money_flow(20)
+        individual_flow, _ = await multi_source_fetcher.afetch_individual_money_flow(20)
 
         await storage.upsert_sentiment_snapshot(
             trade_date=date.today(),

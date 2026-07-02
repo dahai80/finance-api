@@ -51,15 +51,21 @@ async def get_money_flow(limit: int = 30) -> list[dict]:
 
 
 @router.get("/individual-money-flow")
-async def get_individual_money_flow(limit: int = 20) -> list[dict[str, Any]]:
-    """Get individual stock money flow ranking with multi-source fallback."""
+async def get_individual_money_flow(limit: int = 20) -> dict[str, Any]:
+    """Get individual stock money flow ranking with multi-source fallback.
+
+    Returns {data: [...], source: "real"|"mock", ok: true}. Source is "mock"
+    when all live sources are unavailable (circuit breaker open / network) so
+    the frontend can label it instead of presenting fabricated data as real.
+    """
     log.info("GET /api/market/individual-money-flow limit=%d", limit)
     limit = _validate_limit(limit)
     try:
-        return await multi_source_fetcher.afetch_individual_money_flow(limit)
+        items, is_mock = await multi_source_fetcher.afetch_individual_money_flow(limit)
+        return {"data": items, "source": "mock" if is_mock else "real", "ok": True}
     except Exception as exc:
         log.exception("individual_money_flow failed")
-        return _mock_individual_money_flow(limit)
+        return {"data": _mock_individual_money_flow(limit), "source": "mock", "ok": False}
 
 
 @router.get("/quotes")
@@ -213,7 +219,7 @@ async def trigger_sentiment() -> dict[str, Any]:
     try:
         sentiment = await multi_source_fetcher.afetch_sentiment()
         prev_flow = await storage.get_live_money_flow(20)
-        individual_flow = await multi_source_fetcher.afetch_individual_money_flow(20)
+        individual_flow, _ = await multi_source_fetcher.afetch_individual_money_flow(20)
 
         await storage.upsert_sentiment_snapshot(
             trade_date=date.today(),
