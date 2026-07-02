@@ -482,7 +482,21 @@ async def build_detail(stock_code: str, days: int = 90) -> dict:
     }
     any_mock = any(v == "mock" for v in sources.values())
 
-    current_price = price_history["summary"]["end_price"]
+    # Live quote takes precedence over price_history end_price (the last bar's
+    # close = previous trading day, stale intraday). Sina quotes are accurate
+    # to the cent; a trading system must never show a stale price as current.
+    live_price = None
+    try:
+        from data_provider import multi_source_fetcher
+        quotes = await multi_source_fetcher.afetch_realtime_quotes([stock_code])
+        q = quotes.get(stock_code)
+        if q and q.get("price") is not None:
+            live_price = float(q["price"])
+    except Exception as exc:
+        log.warning("build_detail live quote failed for %s: %s", stock_code, exc)
+
+    end_price = price_history["summary"]["end_price"]
+    current_price = live_price if live_price is not None else end_price
     start_price = price_history["summary"]["start_price"]
     change_pct = round((current_price - start_price) / start_price * 100, 2) if start_price else 0
 

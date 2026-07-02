@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Any
 
@@ -54,15 +55,23 @@ async def get_money_flow(limit: int = 30) -> list[dict]:
 async def get_individual_money_flow(limit: int = 20) -> dict[str, Any]:
     """Get individual stock money flow ranking with multi-source fallback.
 
-    Returns {data: [...], source: "real"|"mock", ok: true}. Source is "mock"
-    when all live sources are unavailable (circuit breaker open / network) so
-    the frontend can label it instead of presenting fabricated data as real.
+    Cache-first: 命中缓存 <10ms 返回；缓存为空或过期(>60s)时立即返回当前数据
+    并触发后台刷新。东财接口被代理阻断时首次重试需 1-2s，缓存把该延迟
+    从用户请求路径上移除，保证生产时延稳定 sub-second。
+    Returns {data: [...], source: "real"|"mock", ok: true}.
     """
     log.info("GET /api/market/individual-money-flow limit=%d", limit)
     limit = _validate_limit(limit)
     try:
-        items, is_mock = await multi_source_fetcher.afetch_individual_money_flow(limit)
-        return {"data": items, "source": "mock" if is_mock else "real", "ok": True}
+        cached = multi_source_fetcher.get_cached_individual_money_flow(limit)
+        if not cached["data"] or cached["stale"]:
+            asyncio.create_task(multi_source_fetcher.arefresh_individual_money_flow_cache(20))
+        if cached["data"]:
+            source = "mock" if cached["is_mock"] else "real"
+            return {"data": cached["data"], "source": source, "ok": True}
+        # 缓存为空（冷启动）：立即返回 mock 并标注 ok=False，绝不阻塞用户请求
+        # 等待东财重试。后台任务会在 60s 内填充真实/缓存数据供后续请求使用。
+        return {"data": _mock_individual_money_flow(limit), "source": "mock", "ok": False}
     except Exception as exc:
         log.exception("individual_money_flow failed")
         return {"data": _mock_individual_money_flow(limit), "source": "mock", "ok": False}

@@ -147,6 +147,24 @@ async def _job_industry_news() -> None:
         log.exception("industry_news failed")
 
 
+async def _job_industry_top_stocks() -> None:
+    """每10分钟刷新各行业Top股票缓存 (交易日 8:30-16:00)"""
+    log.info("scheduled job: industry_top_stocks")
+    try:
+        await multi_source_fetcher.afetch_all_industry_top_stocks(10)
+    except Exception as exc:
+        log.exception("industry_top_stocks failed")
+
+
+async def _job_individual_money_flow() -> None:
+    """每5分钟刷新个股资金流缓存 (交易日 9:00-15:00)"""
+    log.info("scheduled job: individual_money_flow")
+    try:
+        await multi_source_fetcher.arefresh_individual_money_flow_cache(20)
+    except Exception as exc:
+        log.exception("individual_money_flow failed")
+
+
 # ── Schedule registration ─────────────────────────────────────────
 
 def init_scheduler() -> AsyncIOScheduler:
@@ -162,7 +180,17 @@ def init_scheduler() -> AsyncIOScheduler:
         CronTrigger(day_of_week="mon-fri", hour="8-15", minute="*/10"),
         id="industry_news",
     )
+    scheduler.add_job(
+        _job_industry_top_stocks,
+        CronTrigger(day_of_week="mon-fri", hour="8-15", minute="*/10"),
+        id="industry_top_stocks",
+    )
+    scheduler.add_job(
+        _job_individual_money_flow,
+        CronTrigger(day_of_week="mon-fri", hour="9-14", minute="*/5"),
+        id="individual_money_flow",
+    )
     scheduler.add_job(_job_daily_content, CronTrigger(day_of_week="mon-fri", hour=15, minute=15), id="daily_content")
     scheduler.add_job(_job_watchlist_refresh, CronTrigger(day_of_week="mon-fri", hour=15, minute=30), id="watchlist_refresh")
-    log.info("scheduler: 6 jobs registered (ipo_sync, premarket_sentiment, money_flow, industry_news, daily_content, watchlist_refresh)")
+    log.info("scheduler: 8 jobs registered (ipo_sync, premarket_sentiment, money_flow, industry_news, industry_top_stocks, individual_money_flow, daily_content, watchlist_refresh)")
     return scheduler

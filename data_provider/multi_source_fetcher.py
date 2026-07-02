@@ -374,7 +374,7 @@ def _fetch_industry_top_stocks_akshare(limit: int = 10) -> list[dict[str, Any]]:
         import akshare as ak
 
         _random_delay()
-        df = ak.stock_board_industry_name_em()
+        df = _call_with_timeout(ak.stock_board_industry_name_em, 8.0)
         if df is None or df.empty:
             _breaker.record_failure("akshare_industry")
             return []
@@ -383,7 +383,7 @@ def _fetch_industry_top_stocks_akshare(limit: int = 10) -> list[dict[str, Any]]:
         spot_map: dict[str, dict[str, Any]] = {}
         try:
             _random_delay()
-            spot_df = ak.stock_zh_a_spot_em()
+            spot_df = _call_with_timeout(ak.stock_zh_a_spot_em, 8.0)
             if spot_df is not None and not spot_df.empty:
                 for _, r in spot_df.iterrows():
                     c = str(r.get("代码", "")).strip()
@@ -599,7 +599,9 @@ def _fetch_individual_money_flow_akshare(limit: int = 10) -> list[dict[str, Any]
     try:
         import akshare as ak
         _random_delay()
-        df = ak.stock_individual_fund_flow_rank(indicator="今日")
+        # 东财接口在本环境下被代理阻断会触发重试，导致单次调用 1-2s。
+        # 用 daemon-thread 超时把失败延迟收敛到 5s 内，避免拖垮生产时延。
+        df = _call_with_timeout(ak.stock_individual_fund_flow_rank, 5.0, "今日")
         if df is None or df.empty:
             _breaker.record_failure("akshare_individual_flow")
             return []
@@ -645,6 +647,49 @@ async def afetch_individual_money_flow(limit: int = 10) -> tuple[list[dict[str, 
     """Async version of fetch_individual_money_flow — runs in thread executor."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, lambda: fetch_individual_money_flow(limit))
+
+
+# 个股资金流：60s 短缓存。该数据日内波动剧烈但每分钟级刷新足够，
+# 缓存命中把首次 1-2s 的东财重试收敛到 <10ms，第二次起直接走缓存。
+_INDIV_MF_CACHE: dict[str, Any] = {"data": [], "is_mock": True, "ts": 0.0}
+_INDIV_MF_TTL = 60.0
+_INDIV_MF_LOCK = threading.Lock()
+
+
+def refresh_individual_money_flow_cache(limit: int = 10) -> dict[str, Any]:
+    """同步刷新个股资金流缓存，返回带元信息的快照。"""
+    items, is_mock = fetch_individual_money_flow(limit)
+    with _INDIV_MF_LOCK:
+        _INDIV_MF_CACHE["data"] = items
+        _INDIV_MF_CACHE["is_mock"] = is_mock
+        _INDIV_MF_CACHE["ts"] = time.time()
+    log.info("individual money flow cache refreshed: %d items mock=%s", len(items), is_mock)
+    return {"data": items, "is_mock": is_mock, "ts": _INDIV_MF_CACHE["ts"]}
+
+
+async def arefresh_individual_money_flow_cache(limit: int = 10) -> dict[str, Any]:
+    """异步刷新个股资金流缓存。"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: refresh_individual_money_flow_cache(limit))
+
+
+def get_cached_individual_money_flow(limit: int = 10) -> dict[str, Any]:
+    """读取个股资金流缓存快照（不触发刷新）。stale=True 表示需要后台刷新。"""
+    with _INDIV_MF_LOCK:
+        data = list(_INDIV_MF_CACHE["data"])
+        is_mock = _INDIV_MF_CACHE["is_mock"]
+        ts = _INDIV_MF_CACHE["ts"]
+    now = time.time()
+    age = now - ts if ts else float("inf")
+    stale = age > _INDIV_MF_TTL
+    return {
+        "data": data[:limit] if not is_mock else data[:limit * 2],
+        "is_mock": is_mock,
+        "updated_at": ts,
+        "age_seconds": round(age, 1) if ts else None,
+        "stale": stale,
+        "ttl_seconds": _INDIV_MF_TTL,
+    }
 
 
 def _mock_individual_money_flow(limit: int = 10) -> list[dict[str, Any]]:
@@ -960,6 +1005,45 @@ def get_cached_industry_news_grouped() -> dict[str, Any]:
         "age_seconds": round(age, 1) if ts else None,
         "stale": age > _GROUPED_TTL,
         "ttl_seconds": _GROUPED_TTL,
+    }
+
+
+# ── Industry top-stocks cache ──────────────────────────────────────────
+# /api/industry/top-stocks serves from this cache in <10ms. The live fetch
+# hits AkShare East Money once per industry (~8s total) so it must NEVER run
+# on the request path — the scheduler refreshes every 10 min instead.
+
+_TOP_STOCKS_CACHE: dict[str, Any] = {"data": [], "ts": 0.0}
+_TOP_STOCKS_TTL = 600.0  # 10 minutes
+_TOP_STOCKS_LOCK = threading.Lock()
+
+
+def fetch_all_industry_top_stocks(limit: int = 10) -> list[dict[str, Any]]:
+    items = fetch_industry_top_stocks(limit)
+    with _TOP_STOCKS_LOCK:
+        _TOP_STOCKS_CACHE["data"] = items
+        _TOP_STOCKS_CACHE["ts"] = time.time()
+    log.info("industry top stocks cache refreshed: %d industries", len(items))
+    return items
+
+
+async def afetch_all_industry_top_stocks(limit: int = 10) -> list[dict[str, Any]]:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: fetch_all_industry_top_stocks(limit))
+
+
+def get_cached_industry_top_stocks() -> dict[str, Any]:
+    with _TOP_STOCKS_LOCK:
+        data = _TOP_STOCKS_CACHE["data"]
+        ts = _TOP_STOCKS_CACHE["ts"]
+    now = time.time()
+    age = now - ts if ts else float("inf")
+    return {
+        "data": data,
+        "updated_at": ts,
+        "age_seconds": round(age, 1) if ts else None,
+        "stale": age > _TOP_STOCKS_TTL,
+        "ttl_seconds": _TOP_STOCKS_TTL,
     }
 
 

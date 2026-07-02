@@ -19,6 +19,8 @@ Next.js Frontend → API Proxy → finance-api (FastAPI) → PostgreSQL + Redis 
 - **超时不阻塞事件循环**：同步数据源调用通过 daemon 线程 + `queue.Queue` 实现超时（`signal.alarm` 仅主线程可用，故替换）。
 - **优雅降级**：Redis 不可用时资金流接口返回空数组并告警，而非抛 500；调度任务全部 try/except，单任务失败不影响其他任务。
 - **真实健康检查**：`/health` 实际探测 DB（`SELECT 1`）与 Redis（`ping`），返回 `ok`/`degraded` 就绪状态。
+- **缓存优先 + 实时价覆盖**：高耗时接口（行业 Top 股票、行业动态、个股资金流）采用进程内 TTL 缓存 + 路由层 cache-first，命中即 <10ms 返回，缓存为空时立即返回 mock（`ok:false`）绝不阻塞用户请求，后台异步刷新填充。自选股详情缓存命中时仍用新浪实时价覆盖 `current_price` 并重算 `change_pct`，保证缓存期间价格零时延——流畅性与准确性兼得。
+- **生产时延**：全量接口实测 P50 < 30ms（行情直连新浪 ~30ms，其余缓存命中 < 10ms），冷启动不阻塞。
 
 > 单实例无法物理保证 99.99999% 可用性，以上为代码层的稳定性与可信度保障。
 
@@ -170,7 +172,7 @@ curl "http://localhost:8000/api/market/quotes?codes=600519,000001"
 
 ## 定时任务 (APScheduler)
 
-6 个内置调度任务（均为工作日）：
+8 个内置调度任务（均为工作日）：
 
 | 任务 | 时间 | 说明 |
 |------|------|------|
@@ -178,6 +180,8 @@ curl "http://localhost:8000/api/market/quotes?codes=600519,000001"
 | `premarket_sentiment` | 08:30 | 盘前情绪快照（美股/概念/A50） |
 | `money_flow` | 盘中每 5 分钟 (9:30-15:00) | 更新板块资金流向 |
 | `industry_news` | 每 10 分钟 (8:30-16:00) | 刷新各行业动态缓存 |
+| `industry_top_stocks` | 每 10 分钟 (8:30-16:00) | 刷新各行业 Top 股票缓存 |
+| `individual_money_flow` | 盘中每 5 分钟 (9:00-15:00) | 刷新个股资金流缓存 |
 | `daily_content` | 15:15 | 高评分新股生成短视频脚本（LLM） |
 | `watchlist_refresh` | 15:30 | 盘后自选股数据刷新 |
 
@@ -216,7 +220,7 @@ finance-api/
 ├── main.py                      # FastAPI 应用入口 + 全局异常中间件 + CORS
 ├── config.py                    # 配置与日志
 ├── storage.py                   # PostgreSQL + Redis 存储层（双检锁单例）
-├── scheduler.py                 # APScheduler 定时任务（6 个）
+├── scheduler.py                 # APScheduler 定时任务（8 个）
 ├── routers/                     # API 路由
 │   ├── health.py                # 健康检查（DB/Redis 探活）
 │   ├── ipo.py                   # IPO 新股

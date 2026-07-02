@@ -68,16 +68,19 @@ async def add_industry_event(event: IndustryEventCreate) -> dict[str, Any]:
 
 @router.get("/top-stocks")
 async def get_industry_top_stocks(limit: int = 20) -> dict[str, Any]:
-    # Top performing stocks by industry with multi-source fallback. Mock
-    # fallback is flagged so the UI never presents fabricated stocks as real.
+    # Top stocks by industry, served from a 10-min cache refreshed by the
+    # scheduler (sub-10ms). The live fetch is ~8s (AkShare East Money per
+    # industry) so it never runs on the request path. Cache miss triggers a
+    # background refresh and returns mock honestly labeled.
     log.info("GET /api/industry/top-stocks limit=%d", limit)
     limit = _validate_limit(limit)
-    try:
-        items = await multi_source_fetcher.afetch_industry_top_stocks(limit)
-        return {"data": items, "source": "real", "ok": True}
-    except Exception as exc:
-        log.exception("top_stocks failed")
-        return {"data": _mock_industry_top_stocks(limit), "source": "mock", "ok": False}
+    cached = multi_source_fetcher.get_cached_industry_top_stocks()
+    if not cached["data"] or cached["stale"]:
+        asyncio.create_task(multi_source_fetcher.afetch_all_industry_top_stocks(10))
+    if cached["data"]:
+        data = [{**g, "stocks": g.get("stocks", [])[:limit]} for g in cached["data"]]
+        return {"data": data, "source": "real", "ok": True}
+    return {"data": _mock_industry_top_stocks(limit), "source": "mock", "ok": False}
 
 
 @router.get("/news")
@@ -133,7 +136,7 @@ async def trigger_industry_top_stocks() -> dict[str, Any]:
     """Manually trigger industry top stocks data fetch."""
     log.info("POST /api/industry/trigger/top-stocks")
     try:
-        items = await multi_source_fetcher.afetch_industry_top_stocks(10)
+        items = await multi_source_fetcher.afetch_all_industry_top_stocks(10)
         return {"status": "ok", "count": len(items)}
     except Exception as exc:
         log.exception("trigger industry_top_stocks failed")

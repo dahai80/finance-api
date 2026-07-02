@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from config import get_logger
 import storage
 from data_provider import watchlist_fetcher
+from data_provider import multi_source_fetcher
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
 log = get_logger("finance.watchlist")
@@ -81,7 +82,12 @@ async def watchlist_detail(
     stock_code: str,
     days: int = Query(90, ge=1, le=365),
 ) -> dict[str, Any]:
-    """Get full 5-dimension detail for a watched stock (cache-first, live refresh if stale)."""
+    """Get full 5-dimension detail for a watched stock (cache-first, live refresh if stale).
+
+    Cache 保流畅性（避免每次重建五维），但 current_price 必须实时——
+    股价不能有一点差池。命中缓存时用 Sina 实时价覆盖 current_price 并
+    重算 change_pct，既快又准。
+    """
     item = await storage.get_watchlist_item(stock_code)
     now = datetime.utcnow()
 
@@ -98,10 +104,30 @@ async def watchlist_detail(
             # Remove timezone info if present
             cached_at = cached_at.replace(tzinfo=None)
         if cached_at and (now - cached_at) < timedelta(hours=2):
-            return item["cached_details"]
+            detail = dict(item["cached_details"])
+            return await _overlay_live_price(detail, stock_code)
 
     detail = await watchlist_fetcher.build_detail(stock_code, days=days)
     await storage.update_watchlist_cache(stock_code, detail)
+    return detail
+
+
+async def _overlay_live_price(detail: dict[str, Any], stock_code: str) -> dict[str, Any]:
+    """用 Sina 实时价覆盖 detail.current_price 并重算 change_pct。
+
+    取价失败时保持缓存值不变——宁可显示稍旧的真实价，也不编造价格。
+    """
+    try:
+        quotes = await multi_source_fetcher.afetch_realtime_quotes([stock_code])
+        q = quotes.get(stock_code)
+        if q and q.get("price") is not None:
+            live_price = float(q["price"])
+            detail["current_price"] = live_price
+            start_price = detail.get("price_history", {}).get("summary", {}).get("start_price")
+            if start_price:
+                detail["change_pct"] = round((live_price - start_price) / start_price * 100, 2)
+    except Exception as exc:
+        log.warning("watchlist detail live price overlay failed for %s: %s", stock_code, exc)
     return detail
 
 
