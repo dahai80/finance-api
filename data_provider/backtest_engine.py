@@ -27,7 +27,13 @@ async def get_backtest_accuracy(days: int = 30) -> list[dict]:
                COUNT(CASE WHEN status = 'COMPLETED'
                           AND kronos_prediction IS NOT NULL
                           AND fundamental_data IS NOT NULL
-                          AND (kronos_prediction->>'direction') = (fundamental_data->>'actual_direction')
+                          AND (CASE
+                                 WHEN (kronos_prediction->>'close')::numeric
+                                    > (kronos_prediction->>'open')::numeric THEN 'UP'
+                                 WHEN (kronos_prediction->>'close')::numeric
+                                    < (kronos_prediction->>'open')::numeric THEN 'DOWN'
+                                 ELSE 'FLAT'
+                               END) = (fundamental_data->>'actual_direction')
                           THEN 1 END)                             AS correct
         FROM finance_control.fc_stock_snapshot
         WHERE trade_date >= $1
@@ -39,11 +45,14 @@ async def get_backtest_accuracy(days: int = 30) -> list[dict]:
     results = []
     for r in rows:
         total = r["total_predictions"] or 0
+        completed = r["completed"] or 0
         correct = r["correct"] or 0
-        accuracy = round((correct / total * 100), 1) if total > 0 else 0
+        # 准确率分母用 completed（已结算样本）；用 total 会把 PENDING 计入分母压低准确率。
+        accuracy = round((correct / completed * 100), 1) if completed > 0 else 0
         results.append({
             "date": r["trade_date"].isoformat() if isinstance(r["trade_date"], date) else str(r["trade_date"]),
             "total_predictions": total,
+            "completed": completed,
             "correct": correct,
             "accuracy": accuracy,
         })

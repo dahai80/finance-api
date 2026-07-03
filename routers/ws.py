@@ -34,7 +34,11 @@ async def websocket_alerts(websocket: WebSocket):
             except asyncio.TimeoutError:
                 # No client message in 30s; probe liveness. A dead/half-open
                 # socket raises here and is cleaned up in finally.
-                await websocket.send_text("ping")
+                try:
+                    await asyncio.wait_for(websocket.send_text("ping"), timeout=5)
+                except (asyncio.TimeoutError, Exception):
+                    # 半开客户端：send 阻塞超 5s 或出错，视为断开
+                    break
                 continue
             if data == "ping":
                 await websocket.send_text("pong")
@@ -53,13 +57,22 @@ async def broadcast_alert(msg: dict) -> None:
         return
     import json as _json
     payload = _json.dumps(msg)
-    dead: list[WebSocket] = []
-    sent = 0
-    for ws in conns:
+
+    async def _send(ws: WebSocket) -> bool:
         try:
-            await ws.send_text(payload)
-            sent += 1
+            # 单客户端 5s 超时：一个慢/半开连接不会阻塞其它客户端（避免 head-of-line blocking）
+            await asyncio.wait_for(ws.send_text(payload), timeout=5)
+            return True
         except Exception:
+            return False
+
+    results = await asyncio.gather(*[_send(ws) for ws in conns])
+    sent = 0
+    dead: list[WebSocket] = []
+    for ws, ok in zip(conns, results):
+        if ok:
+            sent += 1
+        else:
             dead.append(ws)
     for ws in dead:
         ACTIVE_CONNECTIONS.discard(ws)

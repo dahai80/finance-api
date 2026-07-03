@@ -43,7 +43,7 @@ async def _fetch_industry_flow() -> list[dict[str, Any]]:
     """Fetch industry fund flow from akshare."""
     try:
         import akshare as ak  # type: ignore
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         df = await loop.run_in_executor(
             None, call_with_timeout, ak.stock_fund_flow_industry, 10.0
         )

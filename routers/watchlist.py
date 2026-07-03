@@ -16,9 +16,9 @@ log = get_logger("finance.watchlist")
 
 
 class WatchlistAddRequest(BaseModel):
-    stock_code: str = Field(..., min_length=1)
-    stock_name: str = ""
-    note: str | None = None
+    stock_code: str = Field(..., min_length=1, max_length=16)
+    stock_name: str = Field("", max_length=64)
+    note: str | None = Field(None, max_length=500)
 
 
 # ── Routes without path params first (avoids {stock_code} conflicts) ──
@@ -59,7 +59,8 @@ async def refresh_all_watchlist(days: int = Query(90, ge=1, le=365)) -> dict[str
         code = it["stock_code"]
         try:
             detail = await watchlist_fetcher.build_detail(code, days=days)
-            await storage.update_watchlist_cache(code, detail)
+            if detail.get("source") != "mock":
+                await storage.update_watchlist_cache(code, detail)
             updated += 1
         except Exception:
             log.exception("refresh-all failed for %s", code)
@@ -89,7 +90,7 @@ async def watchlist_detail(
     重算 change_pct，既快又准。
     """
     item = await storage.get_watchlist_item(stock_code)
-    now = datetime.utcnow()
+    now = datetime.now()
 
     if item and item.get("cached_details") and item.get("cached_at"):
         cached_at = item["cached_at"]
@@ -108,7 +109,9 @@ async def watchlist_detail(
             return await _overlay_live_price(detail, stock_code)
 
     detail = await watchlist_fetcher.build_detail(stock_code, days=days)
-    await storage.update_watchlist_cache(stock_code, detail)
+    # mock 数据不缓存——避免把假数据写进缓存 2h 污染后续请求
+    if detail.get("source") != "mock":
+        await storage.update_watchlist_cache(stock_code, detail)
     return detail
 
 
@@ -150,5 +153,7 @@ async def refresh_watchlist_item(
 ) -> dict[str, Any]:
     """Force-refresh a single watched stock's detail data."""
     detail = await watchlist_fetcher.build_detail(stock_code, days=days)
-    await storage.update_watchlist_cache(stock_code, detail)
+    # mock 数据不缓存——避免把假数据写进缓存 2h 污染后续请求
+    if detail.get("source") != "mock":
+        await storage.update_watchlist_cache(stock_code, detail)
     return detail

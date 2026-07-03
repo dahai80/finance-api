@@ -180,7 +180,7 @@ def fetch_money_flow() -> list[dict[str, Any]]:
 
 async def afetch_money_flow() -> list[dict[str, Any]]:
     """Async version of fetch_money_flow — runs in thread executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, fetch_money_flow)
 
 
@@ -333,7 +333,7 @@ def fetch_sentiment() -> dict[str, Any]:
 
 async def afetch_sentiment() -> dict[str, Any]:
     """Async version of fetch_sentiment — runs in thread executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, fetch_sentiment)
 
 
@@ -508,7 +508,7 @@ def fetch_industry_top_stocks(limit: int = 10) -> list[dict[str, Any]]:
 
 async def afetch_industry_top_stocks(limit: int = 10) -> list[dict[str, Any]]:
     """Async version of fetch_industry_top_stocks — runs in thread executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: fetch_industry_top_stocks(limit))
 
 
@@ -627,7 +627,7 @@ def fetch_individual_money_flow(limit: int = 10) -> tuple[list[dict[str, Any]], 
 
 async def afetch_individual_money_flow(limit: int = 10) -> tuple[list[dict[str, Any]], bool]:
     """Async version of fetch_individual_money_flow — runs in thread executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: fetch_individual_money_flow(limit))
 
 
@@ -651,7 +651,7 @@ def refresh_individual_money_flow_cache(limit: int = 10) -> dict[str, Any]:
 
 async def arefresh_individual_money_flow_cache(limit: int = 10) -> dict[str, Any]:
     """异步刷新个股资金流缓存。"""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: refresh_individual_money_flow_cache(limit))
 
 
@@ -828,7 +828,7 @@ def fetch_realtime_quotes(stock_codes: list[str]) -> dict[str, dict[str, Any]]:
 
 async def afetch_realtime_quotes(stock_codes: list[str]) -> dict[str, dict[str, Any]]:
     """Async version of fetch_realtime_quotes — runs in thread executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: fetch_realtime_quotes(stock_codes))
 
 
@@ -932,7 +932,7 @@ def fetch_industry_news(limit: int = 20, industry: str | None = None) -> list[di
 
 async def afetch_industry_news(limit: int = 20, industry: str | None = None) -> list[dict[str, Any]]:
     """Async version of fetch_industry_news — runs in thread executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: fetch_industry_news(limit, industry))
 
 
@@ -980,7 +980,7 @@ def fetch_all_industry_news_grouped(per_industry: int = _GROUPED_PER_INDUSTRY) -
 
 
 async def afetch_all_industry_news_grouped(per_industry: int = _GROUPED_PER_INDUSTRY) -> list[dict[str, Any]]:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: fetch_all_industry_news_grouped(per_industry))
 
 
@@ -1021,7 +1021,7 @@ def fetch_all_industry_top_stocks(limit: int = 10) -> list[dict[str, Any]]:
 
 
 async def afetch_all_industry_top_stocks(limit: int = 10) -> list[dict[str, Any]]:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: fetch_all_industry_top_stocks(limit))
 
 

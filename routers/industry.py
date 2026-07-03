@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import get_logger, settings
 from data_provider import multi_source_fetcher
@@ -16,10 +16,10 @@ log = get_logger("finance.industry_router")
 
 
 class IndustryEventCreate(BaseModel):
-    event_title: str
-    industry_tags: list[str]
-    impact_analysis: Optional[str] = None
-    related_stock_codes: Optional[list[str]] = None
+    event_title: str = Field(..., min_length=1, max_length=200)
+    industry_tags: list[str] = Field(..., max_length=20)
+    impact_analysis: Optional[str] = Field(None, max_length=2000)
+    related_stock_codes: Optional[list[str]] = Field(None, max_length=50)
     event_time: Optional[str] = None
 
 
@@ -140,9 +140,9 @@ async def trigger_industry_top_stocks() -> dict[str, Any]:
     try:
         items = await multi_source_fetcher.afetch_all_industry_top_stocks(10)
         return {"status": "ok", "count": len(items)}
-    except Exception as exc:
+    except Exception:
         log.exception("trigger industry_top_stocks failed")
-        return {"status": "error", "message": str(exc)}
+        return {"status": "error", "message": "trigger_industry_top_stocks failed"}
 
 
 # ── Mock Data ───────────────────────────────────────────────────────────

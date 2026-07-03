@@ -47,16 +47,43 @@ Next.js Frontend → API Proxy → finance-api (FastAPI) → PostgreSQL + Redis 
 - **coroutine 关闭**：`spawn_background_task` 在无运行 loop 分支补 `coro.close()`，消除「coroutine was never awaited」告警。
 - **IPO 评分舍入**：`score_ipo` 总分 `int(round(...))`，修正 69.9 被截成 69 误判 HIGH→MID。
 
+### 第三轮全量评审加固（round 3）
+
+第三轮聚焦回测正确性、静默数据丢失、shutdown 竞态与异常脱敏：
+
+- **回测准确率结构性 0%**：`get_backtest_accuracy` 的 SQL 比对 `kronos_prediction->>'direction'`，但 `kronos_client` 只输出 ohlc 无 `direction` 字段 → 预测方向恒 NULL → accuracy 永远 0%。改为从 `close vs open` 推导预测方向（UP/DOWN/FLAT）再比对 `actual_direction`；分母由 `total` 改 `completed`（旧把 PENDING 计入分母压低准确率）。
+- **kronos 桩数据地雷**：`routers/kronos.py` ImportError 分支原返回捏造价格（`stub:True`，违反股价零容忍）。该路由未在 main.py 注册（孤立），但仍是地雷；改为返回 503 绝不捏造价，并补 `PredictRequest.days` 边界、统一 sys.path、异常脱敏。
+- **静默丢数据：个股资金流历史**：`upsert_sentiment_snapshot` 接收 `prev_day_individual_flow` 参数却从不写入 SQL，调度器/trigger 传入的个股资金流被静默丢弃；`init.sql` 补 `prev_day_individual_flow JSONB` 列（CREATE TABLE 声明 + 既有库幂等 ALTER），upsert 的 INSERT/ON CONFLICT 补该列，`get_sentiment_snapshot` 反序列化也补该列。
+- **JSONB 字符串反序列化**：asyncpg 默认未注册 JSONB codec，`get_industry_events`（industry_tags/related_stock_codes）与 `get_stock_snapshots`（macro_signals/fundamental_data/kronos_prediction）的 JSONB 列可能以 str 返回；补 `isinstance(str)` 守卫 + `json.loads`，与 `list_ipo` 一致。
+- **资金流写失败谎报成功**：`replace_live_money_flow` 改返回 `bool`；`_job_money_flow` 与 `trigger_money_flow` 检查返回值，写 Redis 失败不广播/不谎报 `status:ok`（改 `degraded`），并加 zset TTL 3600s 防调度中断后陈旧数据无限残留。
+- **IPO 评分两条路径分歧**：`routers/ipo.py` 的 `_score_with_industry_heat` 用 `int(sum())` 截断，与 `ipo_scorer.score_ipo` 的 `int(round())` 不一致 → 同一 IPO 经不同入口评分不同；统一为 `int(round())`。调度器 `_job_ipo_sync` 改用同一 `_score_with_industry_heat`（含真实行业热度），消除调度用启发式、路由用真实热度的分歧。
+- **情绪快照 0.0 冒充真实价**：`save_sentiment_snapshot` 默认 `us_markets={"sp500":0.0,...}` 把 0 当真实美股指数价写入；改 `{"status":"no_data"}`。
+- **市场阶段误判**：`get_sentiment` 的 `market_phase` 原靠 money_flow 是否为空判断（Redis 空=盘前），误判；改用实际交易时段（9:30-11:30 / 13:00-15:00，周一至周五）。
+- **资金流出榜与流入榜重叠**：`top_outflow` 原取 `money_flow[-3:] if len>=3`，3≤len<6 时与 `top_inflow[:3]` 重叠；改 `len>=6`。
+- **shutdown 竞态**：`storage` 加 `_closing` 标志，`close()` 置 True，`get_pg`/`get_redis` fast-path 与锁内双重检查，关闭期间新请求直接抛 RuntimeError 而非拿到半关连接。
+- **Redis URL 脱敏**：`get_redis` 日志原打印含密码的完整 URL；改只记 `host:port`，与 pg_dsn 一致。
+- **WS 广播 head-of-line blocking**：`broadcast_alert` 原串行 `send_text`，一个慢/半开客户端阻塞全部；改 `asyncio.gather` + 单客户端 5s 超时。ping 探活同样加 5s 发送超时，半开连接不再挂住。
+- **cron 缺 15:00 收盘窗**：`money_flow`/`individual_money_flow` 原 `hour="9-14"`（最后 14:55），漏 15:00 收盘；改 `9-15`。
+- **daily_content 半写**：`_job_daily_content` 的 UPDATE 循环无事务，中途失败留半写；改事务包裹全成功或全回滚。
+- **mock 污染缓存**：`watchlist_detail`/`refresh_all`/`refresh_watchlist_item` 原无条件缓存 `build_detail` 结果（含 mock）2h；改仅 `source != "mock"` 才缓存。`datetime.utcnow()`（3.12+ 弃用且与 PG `NOW()` 时区错配致缓存永不过期）改 `datetime.now()`。
+- **Pydantic 字段边界**：`MarketAlertCreate`/`WatchlistAddRequest`/`IndustryEventCreate` 原字段无长度/范围限制（DoS/脏写面）；补 `max_length`/`ge`/`le`。
+- **异常脱敏**：`trigger_money_flow`/`trigger_sentiment`/`trigger_industry_top_stocks` 原返回 `message=str(exc)` 泄露内部细节；改脱敏固定串。
+- **get_event_loop 弃用**：13 处 `asyncio.get_event_loop()`（3.12+ 无运行 loop 时抛 RuntimeError）改 `get_running_loop()`。
+
 ### 已知技术债（已评估，非股价关键，留待后续）
 
-- 调度器 `_job_ipo_sync` 走同步 `score_ipo`，手动 `/api/ipo/sync` 走异步 `_score_with_industry_heat`（含行业热度），两条评分路径不一致；当前以手动路由为准。
+- 写端点鉴权：所有 POST/DELETE 路由无鉴权（CRITICAL）。系统部署在 Next.js API 代理后，鉴权可能由前端层承担；直接加 auth 可能破坏前端，留待部署架构确认后实施。当前以 Pydantic 字段边界 + 6 位代码校验作纵深防御。
+- `record_prediction` 无调用方：回测录入路径未接调度/路由，`fc_stock_snapshot` 预测数据为空，`get_backtest_accuracy` 返回空直至录入路径接通。
+- 评分路径未完全统一：`_score_with_industry_heat` 仍位于 `routers/ipo.py`，调度器跨模块 import；后续移至 `ipo_scorer.py`。
 - `generate_batch` 串行调 LLM，量大时慢；非股价路径，暂未并发化。
 - 缺索引：`fc_industry_events(event_time)`、`fc_ipo_factory(ipo_date)`——数据量增大后需补。
 - `TIMESTAMPTZ` 与 `TIMESTAMP` 在 `init.sql` 中混用，后续统一为带时区。
 - tushare 同步调用未加超时（分支休眠，需 `TUSHARE_TOKEN` 才生效）。
-- kronos 微服务在 `ImportError` 时返回桩数据，需在 kronos-service 侧补 `source` 标志区分桩与真实预测。
-- 情绪快照中部分指数价可能为 0（MEDIUM），IPO 详情 `price=0.0` 可能被当真实（MEDIUM）——非实时交易路径。
-- 测试套件 40 例中约 18 例偏轻量，关键路径（overlay price_live、close 竞态、kronos 校验）尚无专测，后续补强。
+- 连接池 `max_size=5` 偏小，高并发可调 10；`get_pg`/`get_redis` 共用 `_init_lock`（非重入），首请求串行，可拆分两把锁。
+- 缓存刷新无 per-key 去重：并发请求可能触发 N 个后台刷新任务（industry_top_stocks / industry_news / individual_money_flow）。
+- `quotes`/`sentiment` 端点未加 `{ok,source}` 信封（契约变更需前端协同，未改；价格路径已无 mock 兜底）。
+- IPO 详情 `price=0.0` 可能被当真实（`akshare_fetcher.py`，MEDIUM）——非实时交易路径。
+- 测试套件 40 例中约 18 例偏轻量，关键路径（overlay price_live、close 竞态、kronos 校验、backtest 方向推导）尚无专测，后续补强。
 
 > 单实例无法物理保证 99.99999% 可用性，以上为代码层的稳定性与可信度保障。
 

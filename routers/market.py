@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import get_logger, settings
 from data_provider import kronos_client
@@ -17,11 +17,26 @@ log = get_logger("finance.market")
 
 
 class MarketAlertCreate(BaseModel):
-    stock_code: str
-    alert_type: str
-    direction: int = 1
-    severity: str = "INFO"
-    event_description: str = ""
+    stock_code: str = Field(..., min_length=1, max_length=16)
+    alert_type: str = Field(..., min_length=1, max_length=32)
+    direction: int = Field(1, ge=-1, le=1)
+    severity: str = Field("INFO", max_length=32)
+    event_description: str = Field("", max_length=500)
+
+
+def _market_phase(now: datetime | None = None) -> str:
+    # A 股交易时段：9:30-11:30 / 13:00-15:00（周一至周五）
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return "CLOSED"
+    t = now.time()
+    if time(9, 30) <= t < time(11, 30) or time(13, 0) <= t < time(15, 0):
+        return "TRADING"
+    if time(9, 15) <= t < time(9, 30):
+        return "PRE_MARKET"
+    if time(11, 30) <= t < time(13, 0):
+        return "LUNCH"
+    return "CLOSED"
 
 
 def _validate_limit(limit: int, max_val: int = 200) -> int:
@@ -141,11 +156,13 @@ async def get_sentiment() -> dict[str, Any]:
     money_flow = await storage.get_live_money_flow(limit=10)
     high_score = await storage.get_ipo_by_score(min_score=70, limit=5)
 
+    # top_outflow 需与 top_inflow 不重叠：资金流按 flow 降序，至少 6 条才能取末 3 条
     result: dict[str, Any] = {
         "top_inflow": money_flow[:3] if money_flow else [],
-        "top_outflow": money_flow[-3:] if len(money_flow) >= 3 else [],
+        "top_outflow": money_flow[-3:] if len(money_flow) >= 6 else [],
         "high_score_ipos": high_score,
-        "market_phase": "PRE_MARKET" if not money_flow else "TRADING",
+        # market_phase 用实际交易时段判断，不依赖 money_flow 是否为空（Redis 空不代表盘前）
+        "market_phase": _market_phase(),
     }
 
     if snapshot:
@@ -168,7 +185,7 @@ async def save_sentiment_snapshot() -> dict[str, Any]:
     today = date.today()
     await storage.upsert_sentiment_snapshot(
         trade_date=today,
-        us_markets=sentiment.get("us_markets", {"sp500": 0.0, "nasdaq": 0.0, "dow": 0.0}),
+        us_markets=sentiment.get("us_markets", {"status": "no_data"}),
         china_concepts_idx=sentiment.get("china_concepts", {"status": "no_data"}),
         ftse_a50=sentiment.get("ftse_a50", {"status": "no_data"}),
         prev_day_money_flow=money_flow,
@@ -211,14 +228,17 @@ async def trigger_money_flow() -> dict[str, Any]:
     log.info("POST /api/market/trigger/money-flow")
     try:
         items = await multi_source_fetcher.afetch_money_flow()
-        if items:
-            await storage.replace_live_money_flow(items)
-            log.info("trigger money_flow: refreshed %d sectors", len(items))
-            return {"status": "ok", "count": len(items)}
-        return {"status": "ok", "count": 0, "message": "no data returned from any source"}
-    except Exception as exc:
+        if not items:
+            return {"status": "degraded", "count": 0, "message": "no data returned from any source"}
+        ok = await storage.replace_live_money_flow(items)
+        if not ok:
+            # fetch 成功但写 Redis 失败——如实报告 degraded，不谎报 ok
+            return {"status": "degraded", "count": len(items), "message": "fetch ok but redis write failed"}
+        log.info("trigger money_flow: refreshed %d sectors", len(items))
+        return {"status": "ok", "count": len(items)}
+    except Exception:
         log.exception("trigger money_flow failed")
-        return {"status": "error", "message": str(exc)}
+        return {"status": "error", "message": "trigger_money_flow failed"}
 
 
 @router.post("/trigger/sentiment")
@@ -240,9 +260,9 @@ async def trigger_sentiment() -> dict[str, Any]:
         )
         log.info("trigger sentiment: snapshot saved for %s", date.today())
         return {"status": "ok", "date": date.today().isoformat()}
-    except Exception as exc:
+    except Exception:
         log.exception("trigger sentiment failed")
-        return {"status": "error", "message": str(exc)}
+        return {"status": "error", "message": "trigger_sentiment failed"}
 
 
 @router.post("/trigger/all")

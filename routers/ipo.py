@@ -43,7 +43,7 @@ async def list_ipo(
 async def sync_ipo() -> dict:
     log.info("POST /api/ipo/sync mock=%s", settings.akshare_mock)
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         if settings.akshare_mock:
             rows = akshare_fetcher.fetch_upcoming_ipo_mock()
         else:
@@ -85,7 +85,8 @@ async def _score_with_industry_heat(row: dict) -> dict:
     try:
         heat_score = await get_industry_heat(board_type)
         scores["industry_heat"] = heat_score
-        base_result["total"] = int(sum(scores.values()))
+        # 与 ipo_scorer.score_ipo 保持一致：四舍五入而非截断，避免同一 IPO 经不同入口评分不一致
+        base_result["total"] = int(round(sum(scores.values())))
         if base_result["total"] >= 70:
             base_result["recommendation"] = "HIGH"
         elif base_result["total"] >= 50:

@@ -27,20 +27,22 @@ async def _job_ipo_sync() -> None:
     """08:00 每日新股同步 + 评分"""
     log.info("scheduled job: ipo_sync")
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         rows = await loop.run_in_executor(
             None, call_with_timeout, akshare_fetcher.fetch_upcoming_ipo_live, 20.0
         )
         if not rows:
             log.warning("ipo_sync: no rows fetched, skip")
             return
-        from data_provider.ipo_scorer import score_ipo
+        # 与 router /api/ipo/sync 使用同一评分路径（含真实行业热度），避免调度用启发式、
+        # 路由用真实热度导致同一 IPO 评分在两条路径上不一致
+        from routers.ipo import _score_with_industry_heat
 
         upserted = await storage.upsert_ipo(rows)
         scored = 0
         for row in rows:
             try:
-                result = score_ipo(row)
+                result = await _score_with_industry_heat(row)
                 await storage.update_ipo_score(
                     row["stock_code"], result["total"], result["recommendation"]
                 )
@@ -53,19 +55,25 @@ async def _job_ipo_sync() -> None:
 
 
 async def _job_money_flow() -> None:
-    """盘中资金流刷新 (每5分钟, 9:30-15:00)"""
+    """盘中资金流刷新 (每5分钟, 9:00-15:55)"""
     log.info("scheduled job: money_flow")
     try:
         items = await multi_source_fetcher.afetch_money_flow()
-        if items:
-            await storage.replace_live_money_flow(items)
-            log.info("money_flow: refreshed %d sectors", len(items))
-            from routers.ws import broadcast_alert
-            await broadcast_alert({
-                "type": "money_flow",
-                "updated_at": datetime.now().isoformat(),
-                "count": len(items),
-            })
+        if not items:
+            log.warning("money_flow: no items, skip broadcast")
+            return
+        ok = await storage.replace_live_money_flow(items)
+        if not ok:
+            # 写 Redis 失败——不广播陈旧数据给前端，如实跳过
+            log.warning("money_flow: redis write failed, skip broadcast")
+            return
+        log.info("money_flow: refreshed %d sectors", len(items))
+        from routers.ws import broadcast_alert
+        await broadcast_alert({
+            "type": "money_flow",
+            "updated_at": datetime.now().isoformat(),
+            "count": len(items),
+        })
     except Exception as exc:
         log.exception("money_flow failed")
 
@@ -133,16 +141,19 @@ async def _job_daily_content() -> None:
 
         stocks = [dict(r) for r in rows]
         results = await llm_generator.generate_batch(stocks, min_score=60)
-        for r in results:
-            await pg.execute(
-                """
-                UPDATE finance_control.fc_ipo_factory
-                SET ai_generated_script = $1
-                WHERE stock_code = $2
-                """,
-                r["script"],
-                r["stock_code"],
-            )
+        # 事务包裹：脚本写入要么全部成功要么全部回滚，避免半写状态
+        async with pg.acquire() as conn:
+            async with conn.transaction():
+                for r in results:
+                    await conn.execute(
+                        """
+                        UPDATE finance_control.fc_ipo_factory
+                        SET ai_generated_script = $1
+                        WHERE stock_code = $2
+                        """,
+                        r["script"],
+                        r["stock_code"],
+                    )
         log.info("daily_content: %d scripts saved to db", len(results))
     except Exception as exc:
         log.exception("daily_content failed")
@@ -183,7 +194,7 @@ def init_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(_job_premarket_sentiment, CronTrigger(day_of_week="mon-fri", hour=8, minute=30), id="premarket_sentiment", **common)
     scheduler.add_job(
         _job_money_flow,
-        CronTrigger(day_of_week="mon-fri", hour="9-14", minute="*/5"),
+        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/5"),
         id="money_flow",
         **common,
     )
@@ -201,7 +212,7 @@ def init_scheduler() -> AsyncIOScheduler:
     )
     scheduler.add_job(
         _job_individual_money_flow,
-        CronTrigger(day_of_week="mon-fri", hour="9-14", minute="*/5"),
+        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/5"),
         id="individual_money_flow",
         **common,
     )

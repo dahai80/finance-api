@@ -66,6 +66,7 @@ CREATE TABLE finance_control.fc_market_sentiment_snapshot (
     china_concepts_idx JSONB,
     ftse_a50 JSONB,
     prev_day_money_flow JSONB,
+    prev_day_individual_flow JSONB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -93,5 +94,20 @@ BEGIN
     ) THEN
         ALTER TABLE finance_control.fc_stock_snapshot
             ADD CONSTRAINT uq_fc_snapshot_code_date UNIQUE (stock_code, trade_date);
+    END IF;
+END $$;
+
+-- round 3: 个股资金流历史列。scheduler/trigger_sentiment 传入 prev_day_individual_flow
+-- 但旧表无此列、upsert 也不写——静默丢数据。既在 CREATE TABLE 内声明，又给既有库补列。
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'finance_control'
+          AND table_name = 'fc_market_sentiment_snapshot'
+          AND column_name = 'prev_day_individual_flow'
+    ) THEN
+        ALTER TABLE finance_control.fc_market_sentiment_snapshot
+            ADD COLUMN prev_day_individual_flow JSONB;
     END IF;
 END $$;

@@ -15,13 +15,18 @@ log = get_logger("finance.storage")
 _pool: asyncpg.Pool | None = None
 _redis: aioredis.Redis | None = None
 _init_lock = asyncio.Lock()
+_closing = False
 
 
 async def get_pg() -> asyncpg.Pool:
     global _pool
-    if _pool is not None:
+    if _pool is not None and not _closing:
         return _pool
+    if _closing:
+        raise RuntimeError("storage is shutting down")
     async with _init_lock:
+        if _closing:
+            raise RuntimeError("storage is shutting down")
         if _pool is not None:
             return _pool
         log.info("opening asyncpg pool dsn=%s", settings.pg_dsn.split("@")[-1])
@@ -33,12 +38,18 @@ async def get_pg() -> asyncpg.Pool:
 
 async def get_redis() -> aioredis.Redis:
     global _redis
-    if _redis is not None:
+    if _redis is not None and not _closing:
         return _redis
+    if _closing:
+        raise RuntimeError("storage is shutting down")
     async with _init_lock:
+        if _closing:
+            raise RuntimeError("storage is shutting down")
         if _redis is not None:
             return _redis
-        log.info("opening redis url=%s", settings.redis_url)
+        # 只记录 host:port，避免把含密码的完整 URL 写进日志
+        _redacted = settings.redis_url.split("@")[-1] if "@" in settings.redis_url else settings.redis_url
+        log.info("opening redis url=%s", _redacted)
         # 显式 socket 超时：Redis 卡死时 get_redis 之后的所有调用不会无限挂起，
         # 保护 /health 与缓存优先路径在依赖掉线时快速失败而非堆积。
         _redis = aioredis.from_url(
@@ -51,23 +62,27 @@ async def get_redis() -> aioredis.Redis:
 
 
 async def close() -> None:
-    # 先把全局引用置空，再 await close()——否则 close() 期间 get_pg/get_redis 的
-    # fast-path（`if _pool is not None: return _pool`）会把正在关闭的池子发出去，
-    # 新请求拿到半关连接。先置空让并发请求走重建分支。
-    global _pool, _redis
-    async with _init_lock:
-        pool, _pool = _pool, None
-        redis, _redis = _redis, None
-        if pool is not None:
-            try:
-                await pool.close()
-            except Exception:
-                log.exception("asyncpg pool close failed")
-        if redis is not None:
-            try:
-                await redis.aclose()
-            except Exception:
-                log.exception("redis close failed")
+    # 先置 _closing=True 拦截新连接请求，再置空全局引用并 await close()——
+    # 否则 close() 期间 get_pg/get_redis 的 fast-path 会把正在关闭的池子发给新请求，
+    # 新请求拿到半关连接。_closing 让并发请求直接抛错走快速失败。
+    global _pool, _redis, _closing
+    _closing = True
+    try:
+        async with _init_lock:
+            pool, _pool = _pool, None
+            redis, _redis = _redis, None
+            if pool is not None:
+                try:
+                    await pool.close()
+                except Exception:
+                    log.exception("asyncpg pool close failed")
+            if redis is not None:
+                try:
+                    await redis.aclose()
+                except Exception:
+                    log.exception("redis close failed")
+    finally:
+        _closing = False
 
 
 async def list_ipo(
@@ -244,7 +259,7 @@ async def get_ipo_by_score(min_score: int = 60, limit: int = 20) -> list[dict[st
     return out
 
 
-async def replace_live_money_flow(items: list[dict[str, Any]]) -> None:
+async def replace_live_money_flow(items: list[dict[str, Any]]) -> bool:
     try:
         r = await get_redis()
         key = "openclaw:finance:live:market_money_flow"
@@ -252,11 +267,16 @@ async def replace_live_money_flow(items: list[dict[str, Any]]) -> None:
             await pipe.delete(key)
             for it in items:
                 await pipe.zadd(key, {str(it["sector"]): float(it["flow"])})
+            # TTL 1h：调度中断/周末后 zset 不会无限残留陈旧资金流，
+            # 过期后 get 返回空，前端显示空而非几周前的旧数据。
+            await pipe.expire(key, 3600)
             await pipe.execute()
         await r.publish("openclaw:finance:live:stream_trigger", "UPDATE")
         log.info("redis zset %s refreshed, %d items", key, len(items))
+        return True
     except Exception as exc:
         log.warning("Redis unavailable for replace_money_flow: %s", exc)
+        return False
 
 
 async def get_industry_events(limit: int = 20) -> list[dict[str, Any]]:
@@ -273,12 +293,24 @@ async def get_industry_events(limit: int = 20) -> list[dict[str, Any]]:
     )
     out: list[dict[str, Any]] = []
     for r in rows:
+        tags = r["industry_tags"] or []
+        if isinstance(tags, str):
+            try:
+                tags = _json_mod.loads(tags)
+            except Exception:
+                tags = []
+        related = r["related_stock_codes"] or []
+        if isinstance(related, str):
+            try:
+                related = _json_mod.loads(related)
+            except Exception:
+                related = []
         out.append({
             "event_id": r["event_id"],
             "event_title": r["event_title"],
-            "industry_tags": r["industry_tags"] or [],
+            "industry_tags": tags if isinstance(tags, list) else [],
             "impact_analysis": r["impact_analysis"],
-            "related_stock_codes": r["related_stock_codes"] or [],
+            "related_stock_codes": related if isinstance(related, list) else [],
             "event_time": r["event_time"].isoformat() if r["event_time"] else None,
         })
     return out
@@ -382,19 +414,22 @@ async def upsert_sentiment_snapshot(
     await pg.execute(
         """
         INSERT INTO finance_control.fc_market_sentiment_snapshot
-            (trade_date, us_markets, china_concepts_idx, ftse_a50, prev_day_money_flow)
-        VALUES ($1, $2, $3, $4, $5)
+            (trade_date, us_markets, china_concepts_idx, ftse_a50,
+             prev_day_money_flow, prev_day_individual_flow)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (trade_date) DO UPDATE SET
             us_markets = EXCLUDED.us_markets,
             china_concepts_idx = EXCLUDED.china_concepts_idx,
             ftse_a50 = EXCLUDED.ftse_a50,
-            prev_day_money_flow = EXCLUDED.prev_day_money_flow
+            prev_day_money_flow = EXCLUDED.prev_day_money_flow,
+            prev_day_individual_flow = EXCLUDED.prev_day_individual_flow
         """,
         trade_date,
         _json_mod.dumps(us_markets),
         _json_mod.dumps(china_concepts_idx),
         _json_mod.dumps(ftse_a50),
         _json_mod.dumps(prev_day_money_flow),
+        _json_mod.dumps(prev_day_individual_flow) if prev_day_individual_flow is not None else None,
     )
     log.info("upserted sentiment snapshot for %s", trade_date.isoformat())
 
@@ -414,7 +449,7 @@ async def get_sentiment_snapshot(trade_date: date | None = None) -> dict[str, An
     if not row:
         return None
     result = dict(row)
-    for key in ("us_markets", "china_concepts_idx", "ftse_a50", "prev_day_money_flow"):
+    for key in ("us_markets", "china_concepts_idx", "ftse_a50", "prev_day_money_flow", "prev_day_individual_flow"):
         val = result.get(key)
         if isinstance(val, str):
             try:
@@ -488,7 +523,19 @@ async def get_stock_snapshots(
         """,
         *params, limit,
     )
-    return [dict(r) for r in rows]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        row_dict = dict(r)
+        # asyncpg 默认未注册 JSONB codec，JSONB 列可能以 str 返回，需手动反序列化
+        for key in ("macro_signals", "fundamental_data", "kronos_prediction"):
+            val = row_dict.get(key)
+            if isinstance(val, str):
+                try:
+                    row_dict[key] = _json_mod.loads(val)
+                except Exception:
+                    pass
+        out.append(row_dict)
+    return out
 
 
 # ── fc_workflow_config ─────────────────────────────────────────────

@@ -479,7 +479,7 @@ async def build_detail(stock_code: str, days: int = 90) -> dict:
     # fabricated prices/financials as authoritative.
     log.info("build_detail: %s days=%d", stock_code, days)
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     async def _t(coro, label: str):
         # Per-section timeout: a hung akshare call (run in a daemon thread)
